@@ -3,7 +3,8 @@
 around them, and the others it recognizes by magic), then glslc_shaders when nothing was found, sdf_shaders for 'SDF\\0' (RE Engine) and arh_entries for 'arh1' (Monolith's
 index), and uniq_keys / var_pairs over what they return.
 Seeds: one synthetic shader pair (a 0x880-byte control section and a small code area per stage, vertex and pixel), wrapped as a BNSH, a BAHS with its binary and program arrays,
-an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an NVN 2 (SM8x) GLSLC output, an SDF definition, and an ARH1 index with one path.
+an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an NVN 2 (SM8x) GLSLC output, an NVN 2 BNSH and BAHS (version 11) of an SM8x
+vertex / pixel pair, an NDSR pack, an SDF definition, and an ARH1 index with one path.
 Clean rejection: red() (SystemExit with a '[RED] ' message naming the problem), or a result (an empty one included). Any other exception is a finding: scan_file's net still
 turns it into an 'unreadable' red line, but one that names no layout problem (test_split_unreadable.py: a reader names its layout, "not an IndexError"); a hang or an oversized
 allocation gets past that net. Usage: see fuzzlib.py"""
@@ -30,11 +31,22 @@ def stage(sph_type):
 VS, PS = stage(0x0461), stage(0x1462)
 
 
-def bnsh():
+def sm8x_stage(st, bahs=False):
+    """(control section, code area) of one SM8x stage (shader_split.sm8x_check): a 0xd8-byte control section (+0x30 its length, +0x38 end of the instructions, +0x40 c1, +0x44 code
+    length, +0x54 stage << 16 in NVN order: 0 vertex, 1 pixel) and a code area of a version-4 SPH and 8 instructions, 0x100 bytes. bahs: agl's BAHS form, the GLSLC output fields
+    zeroed (+0x18..+0x33) and +0xc4 the length"""
+    code = bytearray(0x80); struct.pack_into('<I', code, 0, (2 if st == 'ps' else 1) | 4 << 5 | (5 if st == 'ps' else 1) << 10); code += bytes.fromhex('18790000000000000000000000c00f00') * 8
+    ctl = bytearray(0xd8); ctl[:4] = CTL; struct.pack_into('<4I', ctl, 0x38, 0x100, 0, 0x100, len(code)); struct.pack_into('<I', ctl, 0x54, (st == 'ps') << 16)
+    struct.pack_into('<I', ctl, 0xc4, len(ctl))
+    if not bahs: struct.pack_into('<I', ctl, 0x30, len(ctl)); struct.pack_into('<II', ctl, 0x18, 0x220014, 0x288040)
+    return bytes(ctl), bytes(code)
+
+
+def bnsh(stages=(VS, PS)):
     d = bytearray(0x300); d[:8] = b'BNSH\0\0\0\0'; d[0x60:0x64] = b'grsc'
     struct.pack_into('<IQ', d, 0x7c, 1, 0x100)              # one variation, its table at 0x100
     struct.pack_into('<Q', d, 0x110, 0x140)                 # variation 0: the binary program at 0x140
-    for si, desc, (ctl, code) in ((0, 0x200, VS), (4, 0x240, PS)):
+    for si, desc, (ctl, code) in ((0, 0x200, stages[0]), (4, 0x240, stages[1])):
         struct.pack_into('<Q', d, 0x148 + 8 * si, desc)     # stage slots from program +8: vertex 0, pixel 4
         at = len(d); d += ctl + code
         struct.pack_into('<QQII', d, desc + 8, at, at + len(ctl), len(code), len(ctl))
@@ -42,18 +54,28 @@ def bnsh():
     return bytes(d)
 
 
-def bahs():
+def bahs(stages=(VS, PS)):
     d = bytearray(0x100); d[:4] = b'BAHS'
     struct.pack_into('<II', d, 0x40, 8 + 2 * 0x20, 2)       # the binary array: two records of 0x20 bytes, each holding the 16-byte entry at +0x10
-    region = 0x100 + 2 * 0x880
-    for i, (ctl, code) in enumerate((VS, PS)):
-        rec = 0x48 + 0x20 * i; ent = rec + 0x10; c = 0x100 + 0x880 * i
+    (vs, vk), (ps, pk) = stages
+    region = 0x100 + len(vs) + len(ps)
+    for i, (ctl, code) in enumerate(stages):
+        rec = 0x48 + 0x20 * i; ent = rec + 0x10; c = 0x100 + len(vs) * i
         struct.pack_into('<II', d, rec, 0x20, i)            # record size, kind (0 vertex, 1 fragment)
         struct.pack_into('<IIIi', d, ent, 0x100 * i, 0, len(ctl), c - ent)
     struct.pack_into('<II', d, 0x88, 8 + 16, 1); struct.pack_into('<IIII', d, 0x90, 16, 0, 0x11, 0)   # the program array: one program from binary 0
-    d += VS[0] + PS[0]
-    code = bytearray(0x200); code[:len(VS[1])] = VS[1]; code[0x100:0x100 + len(PS[1])] = PS[1]
+    d += vs + ps
+    code = bytearray(0x200); code[:len(vk)] = vk; code[0x100:0x100 + len(pk)] = pk
     struct.pack_into('<II', d, 0x18, len(code), region); d += code
+    return bytes(d)
+
+
+def ndsr(stages):
+    """An NDSR pack: 'NDSR', +0x0a the record count, 8-byte records {offset, length << 4 | kind} from +0x10, a control section (kind 0 vertex, 3 pixel) and then its code area (kind + 1)"""
+    d = bytearray(0x100); d[:4] = b'NDSR'; struct.pack_into('<IHH', d, 4, 0x300, 0xfeff, 2 * len(stages))
+    for i, ((ctl, code), kind) in enumerate(zip(stages, (0, 3))):
+        k = len(d); d += code; c = len(d); d += ctl + bytes(-len(ctl) % 0x100)
+        struct.pack_into('<4I', d, 0x10 + 16 * i, c, len(ctl) << 4 | kind, k, len(code) << 4 | kind + 1)
     return bytes(d)
 
 
@@ -123,10 +145,13 @@ def arh1():
     return b'arh1' + struct.pack('<9I', 0, len(nodes), so, len(strings), no, len(nodes_b), fo, 1, key) + bytes(0x30 - 40) + enc(strings) + enc(nodes_b) + files
 
 
+S8, S8B = (sm8x_stage('vs'), sm8x_stage('ps')), (sm8x_stage('vs', True), sm8x_stage('ps', True))
+
+
 def seeds():
     b = bnsh()
     return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]), 'glslc-sm8x': glslc_sm8x(),
-            'sdf': sdf(), 'arh1': arh1()}
+            'sdf': sdf(), 'arh1': arh1(), 'bnsh-sm8x': bnsh(S8), 'bahs-sm8x': bahs(S8B), 'ndsr': ndsr(S8)}
 
 
 def check(data):

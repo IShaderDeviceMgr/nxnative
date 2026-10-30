@@ -7,6 +7,7 @@
 #   · BAHS (agl's sharcb: the agl / gsys resource packs, GameAglShader in the Secred pack): file header +0x1c code region start, +0x18 code region length;
 #       each binary entry in the table area is 16 bytes {code offset (relative to the code region, 0x100-aligned), 0, control length 0x880 / 0x88c (3D World 0x848), signed offset of the control relative to this entry's address}.
 #       Control sections are shared between programs, so pairing goes by entry, never by finding code from a control; entries are recognized by a triple check of "control magic + code magic + consistent lengths".
+#   · NVN 2 (Switch 2, SM8x code: Donkey Kong Bananza): BNSH and BAHS keep these layouts with SM8x stages (the comment above bnsh_shaders, bahs_sm8x); agl's NDSR pack holds a few more (ndsr_shaders)
 #   · Unity (UnityFS bundles and the serialized files under Data, read by unityfs.py): the Switch subprograms of each Shader object; the program code = a 0x60 header + one block per stage.
 #       The header is 4 i32 ×6 arrays indexed by NVN stage (0 vertex 1 pixel 2 geometry 3 hull 4 domain 5 compute): [0] unused (0 or a scratch size), [1] block offset (from +0x60, -1 = no such stage), [2] control length, [3] code length;
 #       block = control section + code area. A program's vertex / pixel stages form a pair. The game's own serialized files (data.unity3d, unity default resources) carry no type trees and borrow the bundles' Shader type tree of the same hash (second pass),
@@ -129,6 +130,13 @@ def check(where, st, ctl, code):
     if struct.unpack_from('<I', ctl, 0x704)[0] != len(code): return 'control +0x704 does not match the code area length'
     return None
 
+# NVN 2's BNSH (Switch 2; found on Donkey Kong Bananza, SDK 20.5) keeps the layout bnsh_shaders reads, field for field: grsc at +0x60, the variation count at +0x7c and its table at +0x80
+#   (0xc0 in all of them), 0x40-byte variations with the program at +0x10, the program's 6 stage pointers from +0x08, the stage descriptor's +0x08 control, +0x10 code area, +0x18 code
+#   length, +0x1c control length; the file's length at +0x1c. What differs is the header's version (+0x08: 2.4.0; 2.3.1 in 39 BNSH of 23 effect files) and what each stage
+#   holds: an SM8x control section (sm8x_ctl; 0xd8 bytes, 0xd0 in the 2.3.1 BNSH) and a code area of SPH version 4 + instructions, as NVN 2's GLSLC writes them (glslc_sm8x).
+#   So the stage's control section picks the check, not the version. Bananza: 4,578 BNSH (the material and photo filter bfsha, FSHA version 9.1.1, hold theirs at 0x1000-aligned
+#   offsets; 2 in each of 2,066 Vfx2 effect files, 1 in 291; UI layout archives; Shader/Project's SARC; 2 in main), 91,139 stages, every one passing sm8x_check with its slot equal to control +0x54.
+#   Variations share stages (the material bfsha: 12,480 variations, 2,237 control sections), each read through its own pointers as before
 def bnsh_shaders(d, base, label):
     where = f'{label} BNSH @{base:#x}'
     if d[base + 0x60:base + 0x64] != b'grsc': red(f'{where} has no grsc block')
@@ -142,9 +150,10 @@ def bnsh_shaders(d, base, label):
             if not sc: continue
             pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} variation {v} {st}')
             ctl, code = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section'), span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
-            why = check(label, st, ctl, code)
+            sm8x = sm8x_ctl(ctl)   # NVN 2's BNSH: the same layout, SM8x stages (see above)
+            why = sm8x_check(st, ctl, code) if sm8x else check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
-            out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
+            out.append((f'{label}#BNSH@{base:#x}#var{v}' + (SM8X_TAG if sm8x else ''), st, ctl, code))
     return out
 
 def bahs_shaders(d, label):
@@ -153,6 +162,9 @@ def bahs_shaders(d, label):
     out = []
     for a in range(0, region - 16, 4):
         off, z, csz, rel = struct.unpack_from('<IIIi', d, a)
+        if not z and 0x68 <= csz < 0x760 and not off % 0x100:   # an SM8x entry (bahs_sm8x); Maxwell's control sections are never this short
+            if sm := bahs_sm8x(d, a, off, csz, rel, rsz, region, label): out.append(sm)
+            continue
         if z or not (csz in (0x880, 0x88c) or 0x760 <= csz < 0x880) or off % 0x100: continue   # control length: Mario 0x880 / 0x88c, 3D World's BAHS version 9 0x848
         c = a + rel
         if c < 0 or c + csz > region or d[c:c + 4] != CTL_MAGIC: continue
@@ -165,6 +177,21 @@ def bahs_shaders(d, label):
     bahs_variations(d, label, [o[0] for o in out])
     return out
 
+def bahs_sm8x(d, a, off, csz, rel, rsz, region, label):
+    """The BAHS entry at a when it is an SM8x shader (Switch 2; found on Donkey Kong Bananza, SDK 20.5): agl's BAHS version 11 keeps the version-9 layout bahs_shaders reads (header
+    +0x18 code region length, +0x1c its start; 16-byte entries {code offset, 0, control length, signed offset of the control from the entry}, the binary and program arrays of
+    bahs_variations) with SM8x stages: a 0xd8-byte control section (sm8x_ctl) whose GLSLC output fields are zero (+0x18 / +0x1c the compiler version, +0x20 the hash, +0x30 its own
+    length, +0x98, +0xbc, +0xc8: in all 16,273 entries of its 11 files, where its BNSH keep them) and +0xc4 still its length, and a code area of SPH version 4 + instructions (code
+    region + the entry's offset, control +0x44 bytes). The stage is control +0x54 (SM8X_STAGES), which sm8x_check checks against the SPH. → (label, stage, control, code) or None"""
+    c = a + rel
+    if c < 0 or c + csz > region or d[c:c + 4] != CTL_MAGIC: return None
+    ctl = d[c:c + csz]
+    if not sm8x_ctl(ctl): return None
+    n, s = struct.unpack_from('<I', ctl, 0x44)[0], struct.unpack_from('<I', ctl, 0x54)[0] >> 16
+    if off + n > rsz or s >= len(SM8X_STAGES): return None
+    st, code = SM8X_STAGES[s], d[region + off:region + off + n]
+    return None if sm8x_check(st, ctl, code) else (f'{label}#BAHS@{a:#x}{SM8X_TAG}', st, ctl, code)
+
 BAHS_VAR = {}   # BAHS entry label → the program variation it belongs to (bahs_variations; var_pairs pairs by it)
 def bahs_variations(d, label, entries):
     """The variations of an agl BAHS file's programs, for var_pairs. The table area holds a binary array (u32 byte size, u32 count, then per binary a record: u32 record size, u32 kind
@@ -173,7 +200,7 @@ def bahs_variations(d, label, entries):
     and the n-th fragment binary in that range are one variation. Breath of the Wild: 109 of the 543 pairs drawn on a cold start in Zora's Domain came from these files, and none was in
     shader_pairs.tsv, which paired only BNSH variations. A file whose arrays do not read back (another layout, or an entry bahs_shaders took that no record holds) gives no pairs"""
     if not entries: return
-    taken = {int(e.rsplit('@', 1)[1], 16) for e in entries}
+    taken = {int(e.rsplit('@', 1)[1].removesuffix(SM8X_TAG), 16): e for e in entries}   # entry address → its label
     arr = min(taken) - 0x18
     if arr < 0x20: return
     asz, acnt = struct.unpack_from('<II', d, arr)
@@ -184,7 +211,7 @@ def bahs_variations(d, label, entries):
         rs, kind = struct.unpack_from('<II', d, o)
         if rs < 0x20: return
         recs.append((o + 0x10, kind)); o += rs
-    if o != arr + asz or not taken <= {a for a, _ in recs}: return
+    if o != arr + asz or not taken.keys() <= {a for a, _ in recs}: return
     psz, pcnt = struct.unpack_from('<II', d, o)
     if o + psz > len(d) or not pcnt: return
     q, bases = o + 8, []
@@ -200,8 +227,27 @@ def bahs_variations(d, label, entries):
         for i in range(bases[p], bases[p + 1]):
             a, k = recs[i]
             if k > 1: continue   # compute and the other kinds pair with nothing
-            if a in taken: BAHS_VAR[f'{label}#BAHS@{a:#x}'] = f'{label}#BAHS#prog{p}#var{seen[k]}'
+            if a in taken: BAHS_VAR[taken[a]] = f'{label}#BAHS#prog{p}#var{seen[k]}'
             seen[k] += 1
+
+NDSR = b'NDSR'
+NDSR_STAGES = {0: 'vs', 3: 'ps', 6: 'cs'}   # an NDSR control section's record kind → its stage; the code area's record is the next kind
+def ndsr_shaders(d, label):
+    """The SM8x shaders of an NDSR pack (agl's agl_ndsr.pck in Donkey Kong Bananza's Lib/agl/agl_resource SARC, Switch 2): 'NDSR', +0x04 u32 0x300, +0x08 the byte order mark 0xfeff, +0x0a u16 record count, records from +0x10, 8 bytes
+    each {u32 offset, u32 length << 4 | kind}. A shader is a control section record (kind 0, 3 or 6: NDSR_STAGES) followed by its code area's (that kind + 1); the other kinds (9 .. 0xc)
+    are other data. Bananza's pack: 110 records, 3 vertex, 3 pixel and 24 compute shaders, full 0xd8-byte SM8x control sections (sm8x_ctl; another GLSLC version at +0x18 than the game's), each code area
+    at a 0x100-aligned offset with control +0x44 its length; record kind and control +0x54 agree in all 30. Nothing in the pack says which vertex and pixel shaders form a program, so each
+    is a program of one stage (SINGLE_STAGE). A record that does not read back gives no shader; → [(label, stage, control, code)]"""
+    n, out = struct.unpack_from('<H', d, 0xa)[0] if len(d) >= 0x10 else 0, []
+    if 0x10 + 8 * n > len(d): return []   # records past the end: not a pack this reads
+    recs = [struct.unpack_from('<II', d, 0x10 + 8 * i) for i in range(n)]
+    for (co, cw), (ko, kw) in zip(recs, recs[1:]):
+        st = NDSR_STAGES.get(cw & 0xf)
+        if not st or kw & 0xf != (cw & 0xf) + 1: continue
+        ctl, code = d[co:co + (cw >> 4)], d[ko:ko + (kw >> 4)]
+        if not sm8x_ctl(ctl) or sm8x_check(st, ctl, code) or struct.unpack_from('<I', ctl, 0x54)[0] >> 16 != SM8X_STAGES.index(st): continue
+        out.append((f'{label}#NDSR@{co:#x}{SM8X_TAG}', st, ctl, code))
+    return out
 
 def mshd_shaders(d, label):
     out, c = [], d.find(CTL_MAGIC)
@@ -253,8 +299,13 @@ SM8X_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # SM8x control +0x54 >> 16:
 SM8X_TAG = '#SM8X'   # ends the label of every SM8x shader (glslc_sm8x), so the map's source column shows the architecture; sm8x_ctl tells it from the control section alone
 def sm8x_ctl(ctl):
     """An SM8x (Volta+ instruction set: Switch 2's Ampere GPU) control section, as the GLSLC of NVN 2 writes it (glslc_sm8x): the control magic, its own length at +0x30, the code area's
-    at +0x44. Maxwell control sections are at least 0x760 bytes (ctl_len), these at most 0x188 (Pokémon Pokopia: 0xd8 in 203,128 of its 213,169 outputs), so the two never meet"""
-    return 0x68 <= len(ctl) < 0x760 and ctl[:4] == CTL_MAGIC and struct.unpack_from('<I', ctl, 0x30)[0] == len(ctl)
+    at +0x44 (or, as agl's BAHS stores them, the GLSLC output fields zeroed and the length at +0xc4). Maxwell control sections are at least 0x760 bytes (ctl_len), these at most 0x188
+    (Pokémon Pokopia: 0xd8 in 203,128 of its 213,169 outputs), so the two never meet"""
+    if not (0x68 <= len(ctl) < 0x760 and ctl[:4] == CTL_MAGIC): return False
+    own = struct.unpack_from('<I', ctl, 0x30)[0]
+    # agl's BAHS (bahs_sm8x) zeroes the fields that describe the GLSLC output, its own length among them, and keeps +0xc4, which holds the length in its 16,273 control sections, in the
+    # 2,251 of Bananza's bfsha and in the 0xd8- and 0xe0-byte ones of Pokopia (7,526 of a sample of 7,611; the longer ones, with data after +0xe0, have other values there)
+    return own == len(ctl) or not own and len(ctl) >= 0xc8 and not any(ctl[0x18:0x34]) and struct.unpack_from('<I', ctl, 0xc4)[0] == len(ctl)
 
 def sm8x_facts(ctl):
     """An SM8x compute shader's thread group (control +0x58, +0x5c, +0x60) and shared memory bytes (+0x64): the fields Maxwell's control keeps at +0x748 and +0x754. Pokémon Pokopia's 3,156
@@ -2252,6 +2303,7 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
+    if d[:4] == NDSR: out.extend(ndsr_shaders(d, label)); return
     if d[:4] == PGDAT and len(d) >= 0x1c and (mem := pgdat_members(d, label)) is not None:   # PlatinumGames
         for nm, m in mem: scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
         return
@@ -2286,11 +2338,11 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#NDSR@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
-# each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders)
+# each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders); agl's NDSR pack, which records no programs (ndsr_shaders)
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
     from the pipeline state) have their real pairs only at draw time. vs_pad uses only the union of the locations the paired pixel shaders read, so every single-stage vertex shader is paired with
@@ -2448,7 +2500,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] not in (b'MSHD', NDSR) and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
