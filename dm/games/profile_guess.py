@@ -132,6 +132,7 @@ def facts_of(exefs, romfs):
             F['nvn_names'] = {s.decode() for s in re.findall(rb'(?<=\0)nvn[A-Z]\w*(?=\0)', img)}   # the NVN functions main asks nvnBootstrapLoader for, by name
         m['kind'] = {'main': 'the game', 'sdk': 'nnSdk', 'rtld': 'rtld'}.get(p.name) or kind(m)
     F['sysres'], F['program'] = npdm(exefs / 'main.npdm')
+    F['switch2'] = switch2(exefs)
     F['npdm'] = npdm_info(exefs / 'main.npdm')
     major = {v.split('_')[0] for v in F['sdkver']}
     F['sdk'] = min((int(v) for v in major if v.isdigit()), default=0)
@@ -192,6 +193,7 @@ def guess(F, hooks=None):
                ('main sets a heap of at most the pool − 64 MB' + (f' − {giant // MiB} MB of bss (counted as used memory)' if giant else '') + f': a {heap // MiB} MB heap region')
                if heap_api else 'main never sets a heap (its memory is its own bss): a 256 MB heap region')
     G['mem_reserve'] = (f'{mem[0]:#x}', mem[3]); G['mem_alias'] = (f'{mem[1]:#x}', ''); G['mem_stack'] = ('0x10000000', ''); G['app_pool'] = (f'{mem[2]:#X}'.replace('0X', '0x'), '')
+    if F.get('switch2'): G['console'] = ('switch2', 'main.npdm carries the extended ACID: a Switch 2 game, which expects Switch 2 answers (nn::pl::IsRunningOnOunce, the NVN 2 API version and names)')
     G['sys_resource'] = (f'{F["sysres"]:#x}', f'the NPDM declares {F["sysres"] // MiB} MB of system resource' + ('' if F['sysres'] else
                          ': IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)'))
 

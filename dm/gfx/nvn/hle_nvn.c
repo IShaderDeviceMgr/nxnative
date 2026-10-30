@@ -94,9 +94,15 @@ static void nvn_init_slots(void) {
     g_nsem = hit;
 }
 
+#define NVN_NFUNC_SWITCH1 537   // names.txt lines before the NVN 2 block
+_Static_assert(NVN_NFUNC >= NVN_NFUNC_SWITCH1, "the name table lost names");
+#define NVN_NFUNC_AVAIL (DM_GAME_SWITCH2 ? NVN_NFUNC : NVN_NFUNC_SWITCH1)   // the names this game can look up
+// The name table is the Switch 1 names (the first NVN_NFUNC_SWITCH1, in the order of main's tables: slot numbers matter) and then the names only NVN 2 (Switch 2) games ask for
+// (names.txt, a sorted block appended after the earlier ones; dm/games/README.md `console`). A Switch 1 game does not get them: it logs the unknown-name red line and receives null, as before.
+// The new names have an unimplemented-function stub (a red line when called) and no implementation yet.
 static void *nvn_lookup(const char *name) {
     nvn_init_slots();
-    for (unsigned i = 0; i < NVN_NFUNC; i++)
+    for (unsigned i = 0; i < NVN_NFUNC_AVAIL; i++)
         if (!strcmp(nvn_names[i], name)) return nvn_thunk[i];
     LOG("[RED] NVN address lookup of an unknown name: %s", name ? name : "(null)");
     return NULL;
@@ -151,7 +157,11 @@ static const int g_devinfo[] = {
 __attribute__((weak)) int dm_sdk_major(void) { return 0; }   // loader.c; graphics unit tests have no loader
 __attribute__((weak)) int dm_glslc_gpu_code(int *major, int *minor) { *major = *minor = 0; return 0; }   // hle_glslc.c: the game's own GLSLC's GPU code version
 static void nvn_api(int api[2]) {
-#ifdef DM_GAME_NVN_API_MAJOR
+#if DM_GAME_SWITCH2 && !defined(DM_GAME_NVN_API_MAJOR)
+    // NVN 2 (Switch 2): Donkey Kong Bananza (SDK 20) requires major == 231 and minor >= 30 (main+0x5c61a4 cmp w8,#0xe7 / b.ne, +0x5c61b0 cmp w8,#0x1e / b.lt, after nvnDeviceGetInteger 0 and 1 at +0x5c6188 / +0x5c619c);
+    // on a mismatch it takes the failure path (+0x5c63e8) and the device pointer stays null, which crashes in nnMain. The floor is reported
+    api[0] = 231; api[1] = 30; LOG("[nvn] device API %d.%d (Switch 2: NVN 2)", api[0], api[1]);
+#elif defined(DM_GAME_NVN_API_MAJOR)
     api[0] = DM_GAME_NVN_API_MAJOR; api[1] = DM_GAME_NVN_API_MINOR; LOG("[nvn] device API %d.%d (game profile device_api)", api[0], api[1]);
 #else
     int m = dm_sdk_major(); api[0] = DM_SDK_OLD(m) ? 53 : g_devinfo[0]; api[1] = DM_SDK_OLD(m) ? 313 : g_devinfo[1]; LOG("[nvn] device API %d.%d (SDK %d)", api[0], api[1], m);
@@ -1261,7 +1271,7 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
         for (unsigned i = 0; i < NVN_NFUNC; i++)
             if (nvn_slot[i].fn != (void *)nvn_unimpl_entry && strcmp(nvn_names[i], "nvnQueuePresentTexture")) { nvn_real[i] = nvn_slot[i].fn; nvn_slot[i].fn = (void *)nvn_prof_entry; }
     LOG("[nvn] null device: %u names, %u implemented (%u semantic + %u empty, %u of them on the large host stack), the other %u go to the red-reporting stub",
-        NVN_NFUNC, g_nsem + nnop, g_nsem, nnop, nbig, NVN_NFUNC - g_nsem - nnop);
+        NVN_NFUNC_AVAIL, g_nsem + nnop, g_nsem, nnop, nbig, NVN_NFUNC_AVAIL - g_nsem - nnop);
 }
 
 // ---------- Window / present ----------

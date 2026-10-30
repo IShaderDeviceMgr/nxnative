@@ -83,7 +83,7 @@ int main(void) {
     gpa = (PFNNVNDEVICEGETPROCADDRESSPROC)boot("nvnDeviceGetProcAddress");
     EXPECT("bootstrap GetProcAddress is non-null", 1, gpa != NULL);
     int nonnull = 0; for (unsigned i = 0; i < NVN_NFUNC; i++) nonnull += gpa(NULL, nvn_names[i]) != NULL;
-    EXPECT("every name in the name table resolves (NVN_NFUNC)", NVN_NFUNC, nonnull);   // used to be hard-coded 523 and kept failing once the name table grew to 536
+    EXPECT("every name in the name table resolves (NVN_NFUNC)", NVN_NFUNC_AVAIL, nonnull);   // the NVN 2 names (after NVN_NFUNC_SWITCH1) resolve for a console switch2 profile only; used to be hard-coded 523 and kept failing once the name table grew to 536
     EXPECT("unknown name resolves to null", 0, gpa(NULL, "nvnNoSuchFunction") != NULL);
 
     // 2. Device
