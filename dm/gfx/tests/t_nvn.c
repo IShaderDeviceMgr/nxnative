@@ -113,6 +113,32 @@ int main(void) {
     EXPECT("signed integer border RGB is numeric", 1, ((samp_t *)&sampler)->p.border[0] == 1.f && ((samp_t *)&sampler)->p.border[2] == 1.f);
     P(nvnSamplerFinalize)(&sampler);
 
+    // 2b. SM8x (Switch 2) program keys follow shader_split.py: sha256(whole control section + code area of +0x44 bytes), first 8 bytes; the builder path (nvn 2) makes the same program as SetShaders
+    {
+        uint8_t ctl[0xd8] = {0x34, 0x12, 0x76, 0x98}, code[16]; for (int i = 0; i < 16; i++) code[i] = (uint8_t)(0xa0 + i);
+        for (int i = 4; i < 0xd8; i++) ctl[i] = (uint8_t)(i * 7);
+        uint32_t own = 0xd8, ncode = 16; memcpy(ctl + 0x30, &own, 4); memcpy(ctl + 0x44, &ncode, 4);
+        uint8_t all[0xd8 + 16], md[CC_SHA256_DIGEST_LENGTH], key[8]; memcpy(all, ctl, 0xd8); memcpy(all + 0xd8, code, 16); CC_SHA256(all, sizeof all, md);
+        NVNshaderData sd = {(NVNbufferAddress)(uintptr_t)code, ctl};
+        EXPECT("SM8x key: hashed", 1, keys_hash(&sd, 0, key));
+        EXPECT("SM8x key: whole section + code area (+0x44)", 0, memcmp(key, md, 8));
+        // agl's archive form: +0x18..+0x33 and +0x30 zero, the length at +0xc4
+        memset(ctl + 0x18, 0, 0x1c); memcpy(ctl + 0xc4, &own, 4); memcpy(all, ctl, 0xd8); CC_SHA256(all, sizeof all, md);
+        EXPECT("SM8x archive form: hashed", 1, keys_hash(&sd, 0, key));
+        EXPECT("SM8x archive form: length at +0xc4", 0, memcmp(key, md, 8));
+        EXPECT("SM8x length: not a section without the magic", 0, ({ uint8_t c2[0xd8]; memcpy(c2, ctl, sizeof c2); c2[0] = 0; sm8x_ctl_len(c2); }));
+        EXPECT("SM8x length: Maxwell-sized length is not SM8x", 0, ({ uint8_t c2[0xd8]; memcpy(c2, ctl, sizeof c2); uint32_t big = 0x760; memcpy(c2 + 0xc4, &big, 4); sm8x_ctl_len(c2); }));
+        // builder -> program: the program holds the builder's stages
+        NVNprogram prog; progb_t b; NVNshaderData recs[2] = {sd, sd};
+        h_nvnProgramBuilderSetDefaults(&b, &dev); h_nvnProgramBuilderSetDevice(&b, &dev);
+        EXPECT("ProgramBuilderSetShaders accepts 2 stages", 1, h_nvnProgramBuilderSetShaders(&b, 2, recs));
+        EXPECT("ProgramInitializeFromBuilder succeeds", 1, h_nvnProgramInitializeFromBuilder(&prog, &b));
+        EXPECT("program from builder: stage count", 2, ((prog_t *)&prog)->nstage);
+        EXPECT("program from builder: stage 1 control", 1, ((prog_t *)&prog)->sd[1].control == ctl);
+        EXPECT("program from builder: stage 1 key", 0, prog_key((prog_t *)&prog, 1, key) ? memcmp(key, md, 8) : 1);
+        h_nvnProgramFinalize(&prog);
+    }
+
     // 3. Memory pool: GPU address = the storage address given by the game
     static uint8_t poolmem[1 << 20] __attribute__((aligned(4096)));
     NVNmemoryPoolBuilder pb; NVNmemoryPool pool;

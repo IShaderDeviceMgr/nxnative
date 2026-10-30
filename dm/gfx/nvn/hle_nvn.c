@@ -610,16 +610,30 @@ static void pk_drop(const void *p) {
     if (k) { CFDictionaryRemoveValue(g_pk, p); free(k); }
     pthread_mutex_unlock(&g_pk_mu);
 }
+// An SM8x (Switch 2, NVN 2 GLSLC) control section: shader_split.py sm8x_ctl. Returns its length in bytes, 0 when the section is not one. The control magic 34 12 76 98 at +0, a length
+// of 0x68..0x75f (Maxwell's sections are at least 0x760) at +0x30, or, in agl's archive form (+0x18..+0x33 all zero, +0x30 = 0), the same length at +0xc4. The code area's length is at +0x44.
+static uint32_t sm8x_ctl_len(const uint8_t *c) {
+    static const uint8_t magic[4] = {0x34, 0x12, 0x76, 0x98};
+    if (memcmp(c, magic, 4)) return 0;
+    uint32_t own; memcpy(&own, c + 0x30, 4);
+    if (own >= 0x68 && own < 0x760) return own;
+    if (own) return 0;
+    for (int i = 0x18; i < 0x34; i++) if (c[i]) return 0;
+    uint32_t l; memcpy(&l, c + 0xc4, 4);
+    return l >= 0xc8 && l < 0x760 ? l : 0;
+}
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0; void *mb; uint64_t mo;
     if (!sd->control) return 0;
-    memcpy(&ncode, (const uint8_t *)sd->control + 0x704, 4);
+    uint32_t sm8x = sm8x_ctl_len((const uint8_t *)sd->control);   // SM8x: the key hashes the whole section (key_ctl) and the code area at +0x44 (shader_split.py)
+    memcpy(&ncode, (const uint8_t *)sd->control + (sm8x ? 0x44 : 0x704), 4);
     int code = sd->data && ncode && ncode < (1u << 24);
     if (mapped && !(code && mtl_addr(sd->data, ncode, &mb, &mo))) return 0;
     // Control +0x20 holds the section's own length: sections of at least 0x880 bytes (all of Mario's, Engage's, Dread's and 13 Sentinels') use the first 0x880; SDK 10's 3D World has 0x850-byte ones followed by other data, so only their own length is used (shader_split.py ctl_len)
     uint32_t nctl = 0x880, own; memcpy(&own, (const uint8_t *)sd->control + 0x20, 4);
     if (own >= 0x760 && own < 0x880) nctl = own;
+    if (sm8x) nctl = sm8x;
     uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
     // Profile key shader_key_skip: bytes of the control section hashed as zeros (shader_split.py key_ctl). Batman: Arkham Knight's engine shares one control section among shaders whose
     // sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7): it hands a program the section of an earlier shader with the same rest, so the bytes there name another shader
@@ -638,7 +652,7 @@ int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     memcpy(key, k->key[st], 8);
     return 1;
 }
-NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
+static NVNboolean program_set_shaders(NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
     mtl_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
@@ -661,9 +675,31 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
         if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
     }
-    OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
+    if (g_log && n) { char ks[17] = "-"; if (k->ok & 1) for (int j = 0; j < 8; j++) snprintf(ks + j * 2, 3, "%02x", k->key[0][j]); OLOG("ProgramSetShaders %p n=%d data0=%#llx key0=%s", (void *)p, n, (unsigned long long)sd[0].data, ks); }
     return 1;
 }
+NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) { return program_set_shaders(p, n, sd); }
+
+// NVN 2 program builder (Switch 2 games). Donkey Kong Bananza's wrapper (main 0x8aa1cc) keeps the builder in a 0x80-byte stack area (zeroed 0x20..0x9f of its frame, nothing else there), calls
+//   SetDefaults(b, dev), SetDevice(b, dev), SetShaders(b, 2, recs) with recs = n NVNshaderData-sized (0x10 byte) records, then InitializeFromBuilder(prog, b). The record is {data, control} like NVNshaderData
+//   (it is the caller's pair {control, data} stored swapped: stp x9, x8). The program object is initialised and set as nvnProgramInitialize + nvnProgramSetShaders would.
+typedef struct { NVNdevice *dev; int32_t n; NVNshaderData sd[6]; } progb_t;
+_Static_assert(sizeof(progb_t) <= 0x80, "progb_t exceeds Bananza's NVNprogramBuilder area (0x80 bytes)");
+NVN_NOPROTO(nvnProgramBuilderSetDefaults, void, void *b, NVNdevice *d) { progb_t *o = b; memset(o, 0, sizeof *o); o->dev = d; }
+NVN_NOPROTO(nvnProgramBuilderSetDevice, void, void *b, NVNdevice *d) { ((progb_t *)b)->dev = d; }
+NVN_NOPROTO(nvnProgramBuilderSetShaders, NVNboolean, void *b, int n, const NVNshaderData *sd) {
+    progb_t *o = b;
+    if (n < 0 || n > 6) { LOG("[RED] ProgramBuilderSetShaders stage count %d", n); return 0; }
+    o->n = n; memcpy(o->sd, sd, n * sizeof *sd);
+    OLOG("ProgramBuilderSetShaders n=%d rec0={%#llx,%p}", n, n ? (unsigned long long)sd[0].data : 0ull, n ? sd[0].control : NULL);
+    return 1;
+}
+NVN_NOPROTO(nvnProgramInitializeFromBuilder, NVNboolean, NVNprogram *p, const void *b) {
+    const progb_t *o = b;
+    h_nvnProgramInitialize(p, o->dev);
+    return program_set_shaders(p, o->n, o->sd);
+}
+NVN_NOPROTO(nvnQueueBuilderSetPrimaryQueue, void, NVNqueueBuilder *b, void *q) { (void)b; (void)q; }   // Bananza main 0x724080 (x0 builder, x1 = a queue pointer loaded from [x20+8]; the w1 = 4 after the call belongs to the next call): the primary queue the new one is tied to, unused by the host
 
 // ---------- Sync / events ----------
 NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, 0}; return 1; }
