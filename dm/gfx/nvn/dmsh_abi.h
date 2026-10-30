@@ -27,6 +27,8 @@
 #define DMSH_C0_SSBO_CS 0x310            // compute stage storage buffer table
 #define DMSH_C0_SSBO_GS 0x410            // geometry stage storage buffer table (NieR:Automata); the hull and domain stages' bases were never seen
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
+#define DMSH_C0_SSBO_CS_SM8X 0x10        // SM8x (Switch 2) compute: storage buffer r's address and size at 0x10 + 0x10 r, in the same 16-byte entries as above. The table is not Maxwell's 0x310: measured on Donkey Kong Bananza, all 975 compute storage buffers of its 174 SM8x compute shaders lie at c0 offsets 0x10 .. 0x1e0 in 16-byte steps (and nowhere else), and the game binds its compute storage buffers at indices 0, 1 and 2 (nvnCommandBufferBindStorageBuffer, stage 5) for the dispatches whose shaders read c0[0x10], c0[0x20] and c0[0x30]. Graphics stages keep the Maxwell bases (every one of 3,082 vertex and pixel storage buffers resolves with them)
+#define DMSH_C0_SSBO_SLOTS_SM8X 32       // storage buffer slots of that table: it ends where Maxwell's dispatch size (0x200) and uniform table (0x210) begin
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
 #define DMSH_C0_CS_UBO_SLOTS 16          // uniform slots of that table

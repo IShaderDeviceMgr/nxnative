@@ -25,13 +25,13 @@ def builder_reflection():
 REFLECT = builder_reflection()
 
 
-def bindings(stage, offsets, flags, cb_slot=0):
+def bindings(stage, offsets, flags, cb_slot=0, sm8x=False):
     source = 'struct spvDescriptorSetBuffer0\n{\n' + ''.join(
         f'    device uint* gp_s{i} [[id({i})]];\n' for i in range(len(offsets))) + '};\n'
     res = {'sbufs': [{'binding': 40 + i, 'slot': i, 'cb_slot': cb_slot,
                       'cb_offset': off // 4, 'flags': flag}
                      for i, (off, flag) in enumerate(zip(offsets, flags))]}
-    return REFLECT('synthetic', stage, source, res)
+    return REFLECT('synthetic', stage, source, res, sm8x=sm8x)
 
 
 class StorageBuffers(unittest.TestCase):
@@ -58,6 +58,26 @@ class StorageBuffers(unittest.TestCase):
     def test_unknown_or_unaligned_offsets_stay_unresolved(self):
         self.assertIsNone(bindings('gs', [0x414], [1])[0]['reg'])
         self.assertIsNone(bindings('hs', [0x410], [1])[0]['reg'])
+
+
+class Sm8xComputeTable(unittest.TestCase):
+    def test_slots_at_0x10_plus_0x10_r(self):
+        # measured on Donkey Kong Bananza: compute storage buffers lie at c0 0x10 .. 0x1e0 (see dmsh_abi.h DMSH_C0_SSBO_CS_SM8X)
+        got = bindings('cs', [0x10, 0x20, 0x30, 0x50, 0x1e0], [1, 1, 0, 0, 1], sm8x=True)
+        self.assertEqual([b['reg'] for b in got], [0, 1, 2, 4, 29])
+
+    def test_maxwell_compute_is_unchanged(self):
+        self.assertIsNone(bindings('cs', [0x10], [1])[0]['reg'])
+        self.assertEqual(bindings('cs', [0x310, 0x320], [1, 0])[1]['reg'], 1)
+
+    def test_sm8x_graphics_keeps_maxwell_bases(self):
+        self.assertEqual([b['reg'] for b in bindings('ps', [0x510, 0x530], [0, 1], sm8x=True)], [0, 2])
+
+    def test_outside_the_table_stays_unresolved(self):
+        self.assertIsNone(bindings('cs', [0x0], [0], sm8x=True)[0]['reg'])
+        self.assertIsNone(bindings('cs', [0x18], [0], sm8x=True)[0]['reg'])   # not a 16-byte entry boundary
+        self.assertEqual(bindings('cs', [0x200], [0], sm8x=True)[0]['reg'], 31)   # the last slot of the table
+        self.assertEqual(bindings('cs', [0x210], [0], sm8x=True)[0]['kind'], 'ubo_ptr')   # past it, Maxwell's uniform table
 
 
 class PushConstants(unittest.TestCase):

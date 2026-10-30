@@ -80,6 +80,8 @@ class Header(unittest.TestCase):
         for lo, hi in zip(bases, bases[1:]): self.assertLessEqual(lo + a.C0_ROW * a.C0_SSBO_SLOTS, hi, 'storage buffer tables overlap')
         self.assertLessEqual(bases[-1] + a.C0_ROW * a.C0_SSBO_SLOTS, a.C0_POINT_SIZE)
         self.assertLessEqual(a.C0_BASE_INSTANCE + 4, a.DRV_SIZE)
+        self.assertEqual(a.C0_SSBO_CS_SM8X + a.C0_ROW * a.C0_SSBO_SLOTS_SM8X, a.C0_DISPATCH + 0x10, 'the SM8x compute table runs up to where Maxwell\'s uniform table starts')
+        self.assertGreaterEqual(a.C0_SSBO_SLOTS_SM8X, a.C0_SSBO_SLOTS)
 
 
 class Build(unittest.TestCase):
