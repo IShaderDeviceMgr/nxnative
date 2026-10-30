@@ -239,6 +239,75 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitTextureSample(context, type, flags, handle, componentMask, Sm8xTexDests(inst, componentMask), sourcesList.ToArray());
         }
 
+        // TMML (0xb69): the texture LOD query, as Maxwell's TMML (EmitTmml): the sources are the array index and coordinates (Ra, then Rb), the components of the mask 72..75 go
+        // to Rd, Rd + 1 (then Rc, Rc + 1) in order, each the LOD of GLSL's textureQueryLod component (instruction component ^ 1) in 24.8 fixed point; z and w are 0.
+        // SM8x: unverified, that the instruction's components keep Maxwell's order (the samples read only component 1) and that .NDV (77) / .SCR (60) need no handling
+        public static void Sm8xTmml(EmitterContext context)
+        {
+            Sm8xInst inst = Sm8xHelper.Inst(context);
+
+            if (inst.Rd == RegisterConsts.RegisterZeroIndex && inst.Rc == RegisterConsts.RegisterZeroIndex)
+            {
+                return;
+            }
+
+            if (inst.Bit(60))
+            {
+                Sm8xHelper.Unsupported(context, "TMML.SCR");
+            }
+
+            int handle = Sm8xTextureHandle(context, inst);
+            SamplerType type = ConvertSm8xDim(context, inst.Bits(61, 3));
+            int componentMask = inst.Bits(72, 4);
+            bool isArray = type.HasFlag(SamplerType.Array);
+            int coordsCount = type.Dimensions;
+            Sm8xTexSources src = new(context, inst, (isArray ? 1 : 0) + coordsCount, (isArray ? 1 : 0) + coordsCount);
+
+            Operand arrayIndex = isArray ? src.Next() : null;
+            List<Operand> sourcesList = [];
+
+            for (int index = 0; index < coordsCount; index++)
+            {
+                sourcesList.Add(src.Next());
+            }
+
+            if (Sample1DAs2D && (type & SamplerType.Mask) == SamplerType.Texture1D)
+            {
+                sourcesList.Add(ConstF(0));
+                type = SamplerType.Texture2D | (type & SamplerType.Array);
+            }
+
+            if (isArray)
+            {
+                sourcesList.Add(arrayIndex);
+            }
+
+            Operand[] sources = sourcesList.ToArray();
+            Operand[] dests = Sm8xTexDests(inst, componentMask);
+            SetBindingPair binding = context.ResourceManager.GetTextureOrImageBinding(
+                Instruction.Lod, type, TextureFormat.Unknown, TextureFlags.None, TextureOperation.DefaultCbufSlot, handle);
+            int outIndex = 0;
+
+            for (int comp = 0; comp < 4; comp++)
+            {
+                if ((componentMask & (1 << comp)) == 0)
+                {
+                    continue;
+                }
+
+                if (comp >= 2)
+                {
+                    context.Copy(dests[outIndex++], Const(0));
+                }
+                else
+                {
+                    Operand res = context.Lod(type, TextureFlags.None, binding, comp ^ 1, sources);
+
+                    context.Copy(dests[outIndex++], context.FP32ConvertToS32(context.FPMultiply(res, ConstF(256.0f))));
+                }
+            }
+        }
+
         // TLD4: component 87..88, offsets 76..77 (1 AOFFI, 2 PTP: two registers), .DC 78; values in Maxwell TLD4's order
         public static void Sm8xTld4(EmitterContext context)
         {

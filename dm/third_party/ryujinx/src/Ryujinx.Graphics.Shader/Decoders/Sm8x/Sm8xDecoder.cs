@@ -58,6 +58,12 @@ namespace Ryujinx.Graphics.Shader.Decoders
                             if (kind == Sm8xKind.Branch)
                             {
                                 ulong target = (ulong)((long)next + inst.BranchOffset);
+
+                                if (target % Sm8xInstSize != 0)
+                                {
+                                    throw new NotSupportedException($"SM8x {Sm8xTable.GetName(inst.Opcode)} at 0x{address:x}: target 0x{target:x} is not an instruction address");
+                                }
+
                                 leaders.Add(target);
                                 queue.Enqueue(target);
                             }
@@ -81,6 +87,12 @@ namespace Ryujinx.Graphics.Shader.Decoders
                 {
                     foreach (ulong target in FindSm8xIndirectTargets(context, ops, address))
                     {
+                        // A table entry that is not an instruction address means the pattern or the table is not what it was taken for: never jump into an instruction
+                        if (target % Sm8xInstSize != 0 || gpuAccessor.GetCode(startAddress + target, Sm8xInstSize).Length < 2)
+                        {
+                            throw new NotSupportedException($"SM8x indirect branch {Sm8xTable.GetName(new Sm8xInst(ops[address]).Opcode)} at 0x{address:x}: target 0x{target:x} is not an instruction address");
+                        }
+
                         if (targets.Add(target))
                         {
                             grew = true;

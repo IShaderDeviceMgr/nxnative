@@ -219,9 +219,30 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        private static (Operand Lo, Operand Hi) Sm8xGlobalAddress(EmitterContext context, Sm8xInst inst, int urStart)
+        // ATOMG: the 32-bit integer atomics, as Maxwell's ATOM: Rd = the old value of [Ra (a 64-bit pair when 70 is set, 72 on 0x3a8) + UR(64, 0x9a8 only; a pair when
+        // 72 is set) + signed offset 40..63] after Rd = Rd op Rb (32); op 87..90 (AtomOp's numbering, NAK set_atom_op), type 73..75 (0 U32, 1 I32; NAK set_atom_type),
+        // the 64-bit and float types and the other operations are rejected. SM8x: unverified, bit 90's meaning (the op field is 87..90 in NAK; the samples set 0)
+        public static void Sm8xAtomg(EmitterContext context)
         {
-            bool wide = inst.Bit(urStart >= 0 ? 90 : 72);
+            Sm8xInst inst = Sm8xHelper.Inst(context);
+            bool ur = inst.Opcode == 0x9a8;
+            AtomOp atomOp = (AtomOp)inst.Bits(87, 4);
+            int type = inst.Bits(73, 3);
+
+            if (type > 1 || atomOp is not (AtomOp.Add or AtomOp.Min or AtomOp.Max or AtomOp.And or AtomOp.Or or AtomOp.Xor or AtomOp.Exch))
+            {
+                Sm8xHelper.Unsupported(context, $"atomic {atomOp} type {type}");
+            }
+
+            (Operand lo, Operand hi) = Sm8xGlobalAddress(context, inst, ur ? 64 : -1, ur ? 70 : 72);
+            Operand res = EmitAtomicOp(context, StorageKind.GlobalMemory, atomOp, type == 0 ? AtomSize.U32 : AtomSize.S32, lo, hi, Sm8xHelper.Gpr(inst.Rb));
+
+            Sm8xHelper.SetGpr(context, inst.Rd, res);
+        }
+
+        private static (Operand Lo, Operand Hi) Sm8xGlobalAddress(EmitterContext context, Sm8xInst inst, int urStart, int wideBit = -1)
+        {
+            bool wide = inst.Bit(wideBit >= 0 ? wideBit : urStart >= 0 ? 90 : 72);
             Operand lo = context.Copy(Sm8xHelper.Gpr(inst.Ra));
             Operand hi = wide && inst.Ra != RegisterConsts.RegisterZeroIndex ? context.Copy(Sm8xHelper.Gpr(inst.Ra + 1)) : Const(0);
 

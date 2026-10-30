@@ -217,8 +217,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             foreach (BasicBlock block in blocks)
             {
-                for (LinkedListNode<INode> node = block.Operations.First; node != null; node = node.Next)
+                LinkedListNode<INode> following;
+
+                // nxnative: the node after the current one is taken before the operation is replaced or deleted. A deleted store or atomic (no storage buffer found, no
+                // result) has no Next any more, which ended the walk of the block there and left the block's later global operations unconverted (a codegen error)
+                for (LinkedListNode<INode> node = block.Operations.First; node != null; node = following)
                 {
+                    following = node.Next;
+
                     if (node.Value is not Operation operation)
                     {
                         continue;
@@ -253,6 +259,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         else
                         {
                             node = nextNode;
+                            following = node.Next;
                         }
                     }
                     else if (operation.Inst == Instruction.Store &&

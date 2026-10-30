@@ -57,6 +57,8 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
             Alu(0x010, InstEmit.Sm8xIadd3, 1, 2, 3, 4, 5, 6, 7);
             Alu(0x024, InstEmit.Sm8xImad, 1, 2, 3, 4, 5, 6, 7);
             Alu(0x027, InstEmit.Sm8xImadHi, 1, 2, 3, 4, 5, 6, 7);
+            Alu(0x025, InstEmit.Sm8xImadWide, 1, 4);
+            Alu(0x01a, InstEmit.Sm8xSgxt, 1, 4, 5, 6);
             Alu(0x00c, InstEmit.Sm8xIsetp, 1, 4, 5, 6);
             Alu(0x017, InstEmit.Sm8xImnmx, 1, 4, 5, 6);
             Alu(0x012, InstEmit.Sm8xLop3, 1, 2, 3, 4, 5, 6, 7);
@@ -80,6 +82,8 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
             // Uniform datapath: the same operations on UR / UP (NAK encode_ualu: opcode + 0x80, bit 91 set; forms 1, 2, 4)
             Alu(0x090, InstEmit.Sm8xIadd3, 1, 2, 4);
             Alu(0x0a4, InstEmit.Sm8xImad, 1, 2, 4);
+            Alu(0x0a5, InstEmit.Sm8xImadWide, 1, 4);
+            Alu(0x09a, InstEmit.Sm8xSgxt, 1, 4);
             Alu(0x08c, InstEmit.Sm8xIsetp, 1, 4);
             Alu(0x092, InstEmit.Sm8xLop3, 1, 2, 4);
             Alu(0x099, InstEmit.Sm8xShf, 1, 2, 4);
@@ -120,6 +124,7 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
             Set(0xb63, InstEmit.Sm8xTld4);
             Set(0xb6c, InstEmit.Sm8xTxd);
             Set(0xb6f, InstEmit.Sm8xTxq);
+            Set(0xb69, InstEmit.Sm8xTmml);
 
             // Memory
             Set(0x983, InstEmit.Sm8xLdl, Sm8xKind.Local);
@@ -134,6 +139,8 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
             Set(0x381, InstEmit.Sm8xLdg);
             Set(0x986, InstEmit.Sm8xStg, Sm8xKind.Store);
             Set(0x386, InstEmit.Sm8xStg, Sm8xKind.Store);
+            Set(0x9a8, InstEmit.Sm8xAtomg, Sm8xKind.Store);
+            Set(0x3a8, InstEmit.Sm8xAtomg, Sm8xKind.Store);
             Set(0xb9b, InstEmit.Sm8xSust, Sm8xKind.Store);
             Set(0xb97, InstEmit.Sm8xSuld);
             Alu(0x013, InstEmit.Sm8xIabs, 1, 4, 5, 6);

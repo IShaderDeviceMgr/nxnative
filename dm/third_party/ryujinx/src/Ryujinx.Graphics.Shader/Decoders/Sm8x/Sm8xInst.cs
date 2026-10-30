@@ -63,8 +63,9 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
         public int CbufSlot => Bits(54, 5);
         public int CbufByteOffset => Bits(38, 16);
 
-        // Branch target: signed byte offset in bits 32..81 from the next instruction (NAK set_rel_offset 34..82 counts words; bits 32..33 are 0)
-        public long BranchOffset => ((long)((Lo >> 32) | (Hi << 32)) << 14) >> 14;
+        // Branch target: signed byte offset in bits 32..81 from the next instruction (NAK set_rel_offset 34..82 counts words, so the offset's low two bits, 32..33, are
+        // not part of it: BRA keeps its .U flag (all threads of the warp agree) in bit 32, which a BRA.U would otherwise turn into an unaligned target)
+        public long BranchOffset => (((long)((Lo >> 32) | (Hi << 32)) << 14) >> 14) & ~3L;
 
         // Second predicate operand of most instructions: 87..89, negated by 90
         public int SrcPred => Bits(87, 3);

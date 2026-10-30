@@ -284,6 +284,7 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
             (0xb60, "TEX"),
             (0xb63, "TLD4"),
             (0xb66, "TLD"),
+            (0xb69, "TMML"),
             (0xb6c, "TXD"),
             (0xb6f, "TXQ"),
             (0xb82, "LDC"),

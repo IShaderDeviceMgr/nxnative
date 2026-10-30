@@ -235,19 +235,90 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // IMAD: A * B + C (the low 32 bits do not depend on .U32 / signed 73); - on C (75 or 63). IMAD.MOV / .SHL / .IADD are spellings of this.
+        // .X (74, CuAssembler's IMAD.X records and NAK's .X bit for IADD3): adds the carry predicate 87..90 (negated by 90), and the - on C is then a bitwise not (as IADD3.X);
+        // the carry out that IADD3.X writes is not produced (the records always have 81..83 = PT)
         public static void Sm8xImad(EmitterContext context)
         {
             Sm8xInst inst = I(context);
             bool u = Sm8xHelper.IsUniformAlu(inst);
+            bool x = inst.Bit(74);
 
-            if (inst.Bit(74))
+            if (x && inst.Bits(81, 3) != RegisterConsts.PredicateTrueIndex)
             {
-                Sm8xHelper.Unsupported(context, ".X");   // SM8x: unverified bit
+                Sm8xHelper.Unsupported(context, ".X with a carry out");
             }
 
             (Sm8xSrc bs, Sm8xSrc cs) = Sm8xHelper.SrcBC(context, inst, u);
             Operand a = Sm8xHelper.SrcA(inst, u).Value;
-            Operand res = context.IAdd(context.IMultiply(a, bs.Value), Sm8xHelper.I32(context, cs));
+            Operand res = context.IAdd(context.IMultiply(a, bs.Value), Sm8xHelper.I32(context, cs, x));
+
+            if (x)
+            {
+                Operand cin = context.ConditionalSelect(Sm8xHelper.Pred(context, inst.SrcPred, inst.SrcPredInv, u), Const(1), Const(0));
+                res = context.IAdd(res, cin);
+            }
+
+            Sm8xHelper.SetReg(context, inst.Rd, res, u);
+        }
+
+        // IMAD.WIDE (0x?25) and UIMAD.WIDE (0x?a5): Rd:Rd+1 = A * B + the 64-bit pair C (C is a register pair in the forms accepted here: 1 and 4), the product signed when
+        // 73 is set (.U32 clears it; NAK OpIMad64). A negated C (75) and .X are rejected
+        public static void Sm8xImadWide(EmitterContext context)
+        {
+            Sm8xInst inst = I(context);
+            bool u = Sm8xHelper.IsUniformAlu(inst);
+
+            if (inst.Bit(74) || inst.Bit(75) || inst.Bit(63) || inst.Bits(81, 3) != RegisterConsts.PredicateTrueIndex)
+            {
+                Sm8xHelper.Unsupported(context, ".X, negated C or a carry out");
+            }
+
+            (Sm8xSrc bs, _) = Sm8xHelper.SrcBC(context, inst, u);
+            Operand a = Sm8xHelper.SrcA(inst, u).Value;
+            int rc = u ? inst.URc : inst.Rc;
+            int zero = u ? RegisterConsts.UniformZeroIndex : RegisterConsts.RegisterZeroIndex;
+            Operand cLo = Sm8xHelper.Reg(rc, u);
+            Operand cHi = rc >= zero ? Const(0) : Sm8xHelper.Reg(rc + 1, u);
+
+            Operand lo = context.IMultiply(a, bs.Value);
+            Operand hi = inst.Bit(73) ? context.MultiplyHighS32(a, bs.Value) : context.MultiplyHighU32(a, bs.Value);
+            Operand sumLo = context.IAdd(lo, cLo);
+            Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(sumLo, lo), Const(1), Const(0));
+            Operand sumHi = context.IAdd(context.IAdd(hi, cHi), carry);
+
+            Sm8xHelper.SetReg(context, inst.Rd, sumLo, u);
+
+            if (inst.Rd < zero)
+            {
+                Sm8xHelper.SetReg(context, inst.Rd + 1, sumHi, u);
+            }
+        }
+
+        // SGXT: Rd = the low B bits of A (B from 1 to 32) sign-extended, or zero-extended with .U32 (73 clear); B is clamped to 32 (.W, 75, wraps instead: rejected).
+        // CuAssembler's records: SGXT R7, R7, 0x8 is a signed byte, SGXT.U32 R3, R11, 0x1 keeps one bit. SM8x: unverified, B = 0 (the field extract gives 0)
+        public static void Sm8xSgxt(EmitterContext context)
+        {
+            Sm8xInst inst = I(context);
+            bool u = Sm8xHelper.IsUniformAlu(inst);
+
+            if (inst.Bit(75))
+            {
+                Sm8xHelper.Unsupported(context, ".W");
+            }
+
+            Operand a = Sm8xHelper.SrcA(inst, u).Value;
+            Operand bits = Sm8xHelper.SrcSecond(context, inst, u).Value;
+
+            if (bits.Type == OperandType.Constant)
+            {
+                bits = Const(System.Math.Min(bits.Value, 32));
+            }
+            else
+            {
+                bits = context.IMinimumU32(bits, Const(32));
+            }
+
+            Operand res = inst.Bit(73) ? context.BitfieldExtractS32(a, Const(0), bits) : context.BitfieldExtractU32(a, Const(0), bits);
 
             Sm8xHelper.SetReg(context, inst.Rd, res, u);
         }
