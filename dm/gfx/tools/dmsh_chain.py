@@ -18,6 +18,8 @@ FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', '
 # This target-specific lowering lives in the vendored translator. Include its
 # sources as well as the rebuilt DLL fingerprint; no old shader cache can bypass it.
 FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
+    'Decoders/Sm8x/Sm8xDecoder.cs', 'Decoders/Sm8x/Sm8xInst.cs', 'Decoders/Sm8x/Sm8xNames.cs', 'Decoders/Sm8x/Sm8xTable.cs',
+    'Instructions/InstEmitSm8xAlu.cs', 'Instructions/InstEmitSm8xHelper.cs', 'Instructions/InstEmitSm8xMemory.cs', 'Instructions/InstEmitSm8xTexture.cs',
     'Instructions/InstEmitSurface.cs', 'IntermediateRepresentation/TextureFlags.cs',
     'Translation/TranslationFlags.cs', 'Translation/HostCapabilities.cs',
     'Translation/Transforms/GeometryToCompute.cs', 'Translation/TranslatorContext.cs', 'Translation/Translator.cs', 'Translation/EmitterContext.cs', 'Translation/ShaderDefinitions.cs', 'CodeGen/Spirv/Instructions.cs',

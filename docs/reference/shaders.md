@@ -425,6 +425,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), [issue #242](https://github.com/seedds/nxnative/issues/242). The report used an untested compiler, but whether that caused the corrupted picture remains **open**. The cache failures were reproduced with stand-in libraries; this does not establish the rendering cause.
 - **Check:** `test_own_compilers.py` checks enforcement and the explicit Metal override. `test_shader_toolchain_cache.py` first restored an untested library after switching compiler identities, for both main shaders and fetch variants, and now rejects it. It also checks stage invalidation on actual Metal, SDK and selected converter changes. `test_spirv_cross_pin.py` checks the shipped binary, pin, lock, architectures and licences.
 
+### SM8x TEX with the .F16 bit: text drawn as solid blocks
+
+- **Symptom:** every glyph of a Ui2d / font draw is a solid rectangle in the right place and colour: the pixel shader never discards outside the glyph.
+- **Cause:** SM8x TEX (0xb60) with bit 79 set returns half-precision results packed in two registers (components 0 and 1 in Rd, 2 and 3 in Rc, as Maxwell's TEXS.F16), but the translator wrote four float32 results into Rd, Rd + 1, Rc, Rc + 1. The shader unpacks Rd and Rc as `half2`, so it read float bit patterns as halves: the glyph coverage (the high half of Rc) was positive for every texel and the `discard_fragment` never fired. SM8x: unverified: NAK and CuAssembler have no such bit; the evidence is 3 of 49 TEX in the game's `ps_main.bin` having it (the only ones in the whole package set) and their consumption as `half2` with the coverage in the high half of Rc.
+- **Fix:** `Sm8xTex` samples into temporaries and writes `PackHalf2x16` of components 0, 1 to Rd and 2, 3 to Rc when bit 79 is set (`InstEmitSm8xTexture.cs`). TLD (0xb66) and TLD4 (0xb63) with the bit throw a `NotSupportedException` naming the opcode, so such a shader fails in the build and does not render wrong. The chain version covers the SM8x translator sources now (`dmsh_chain.py` `FILES`); they were missing.
+- **Found on:** Donkey Kong Bananza (`040074A01BF12000`, no game note yet): pixel shader `774693c4b145ebc5` (the dialog text).
+
 ### SPIRV-Cross parse failures
 
 - **Symptom:** SPIRV-Cross can't parse the SPIR-V (`nullptr` exception).

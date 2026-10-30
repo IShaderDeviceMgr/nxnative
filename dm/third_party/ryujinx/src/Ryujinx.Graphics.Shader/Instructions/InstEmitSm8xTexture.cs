@@ -236,6 +236,41 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 type |= SamplerType.Multisample;
             }
 
+            // SM8x: unverified. Bit 79 (not in NAK's encoder, and CuAssembler's TEX entry has no .F16 form) is the .F16 form, as Maxwell's TEXS.F16: the enabled components are sampled as halves, the first two packed into Rd (low half first) and the
+            // next two packed into Rc (Rd2). Evidence: Donkey Kong Bananza's Ui2d / font pixel shaders (3 of 49 TEX in ps_main.bin, the only ones with the bit) read Rd and Rc as half2 pairs
+            // (the glyph coverage is the high half of Rc); read as plain floats the glyphs come out as solid blocks. The hardware meaning of the bit is inferred, not documented.
+            // TLD (0xb66) has no such evidence: it fails loudly instead of rendering wrong.
+            if (fetch && inst.Bit(79))
+            {
+                throw new NotSupportedException($"SM8x TLD (0xb66) with bit 79 (.F16, unverified) at 0x{context.CurrOp.Address:x}");
+            }
+
+            if (!fetch && inst.Bit(79))
+            {
+                int fcount = BitOperations.PopCount((uint)componentMask);
+                Operand[] halves = new Operand[fcount];
+                Operand[] pair = [ConstF(0), ConstF(0), ConstF(0), ConstF(0)];
+
+                for (int i = 0; i < fcount; i++)
+                {
+                    halves[i] = pair[i] = Local();
+                }
+
+                EmitTextureSample(context, type, flags, handle, componentMask, halves, sourcesList.ToArray());
+
+                if (inst.Rd < RegisterConsts.RegisterZeroIndex)
+                {
+                    context.Copy(Register(inst.Rd, RegisterType.Gpr), context.PackHalf2x16(pair[0], pair[1]));
+                }
+
+                if (fcount > 2 && inst.Rc < RegisterConsts.RegisterZeroIndex)
+                {
+                    context.Copy(Register(inst.Rc, RegisterType.Gpr), context.PackHalf2x16(pair[2], pair[3]));
+                }
+
+                return;
+            }
+
             EmitTextureSample(context, type, flags, handle, componentMask, Sm8xTexDests(inst, componentMask), sourcesList.ToArray());
         }
 
@@ -312,6 +347,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void Sm8xTld4(EmitterContext context)
         {
             Sm8xInst inst = Sm8xHelper.Inst(context);
+
+            if (inst.Bit(79))
+            {
+                throw new NotSupportedException($"SM8x TLD4 (0xb63) with bit 79 (.F16, unverified) at 0x{context.CurrOp.Address:x}");
+            }
 
             if (inst.Rd == RegisterConsts.RegisterZeroIndex && inst.Rc == RegisterConsts.RegisterZeroIndex)
             {
