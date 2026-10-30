@@ -3,7 +3,7 @@
 around them, and the others it recognizes by magic), then glslc_shaders when nothing was found, sdf_shaders for 'SDF\\0' (RE Engine) and arh_entries for 'arh1' (Monolith's
 index), and uniq_keys / var_pairs over what they return.
 Seeds: one synthetic shader pair (a 0x880-byte control section and a small code area per stage, vertex and pixel), wrapped as a BNSH, a BAHS with its binary and program arrays,
-an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an SDF definition, and an ARH1 index with one path.
+an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an NVN 2 (SM8x) GLSLC output, an SDF definition, and an ARH1 index with one path.
 Clean rejection: red() (SystemExit with a '[RED] ' message naming the problem), or a result (an empty one included). Any other exception is a finding: scan_file's net still
 turns it into an 'unreadable' red line, but one that names no layout problem (test_split_unreadable.py: a reader names its layout, "not an IndexError"); a hang or an oversized
 allocation gets past that net. Usage: see fuzzlib.py"""
@@ -91,6 +91,20 @@ def glslc(stages):
     return bytes(d)
 
 
+def glslc_sm8x():
+    """An NVN 2 GLSLC output (SM8x code, shader_split.glslc_sm8x): +0x5c the whole length, +0x60 the first section's data, +0x64 the section count, 0x98-byte section headers from
+    +0xa8; one pixel stage (a 0xd8-byte control section: +0x30 its length, +0x38 end of the instructions, +0x40 c1, +0x44 code length, +0x54 stage 1 << 16; a code area of a version-4
+    SPH, instructions, padding and c1), then a reflection section"""
+    code = bytearray(0x80); struct.pack_into('<I', code, 0, 2 | 4 << 5 | 5 << 10); code += bytes.fromhex('18790000000000000000000000c00f00') * 8 + bytes(0x80 + 0x100)
+    ctl = bytearray(0xd8); ctl[:4] = CTL; struct.pack_into('<I', ctl, 0x30, len(ctl)); struct.pack_into('<4I', ctl, 0x38, 0x100, 0, 0x180, len(code)); struct.pack_into('<I', ctl, 0x54, 1 << 16)
+    first = 0xa8 + 0x98 * 2 + 0x130
+    d = bytearray(first); d[:4] = GLSLC; struct.pack_into('<II', d, 0x60, first, 2)
+    struct.pack_into('<3I', d, 0xa8, len(ctl) + len(code), first, 0); struct.pack_into('<4I', d, 0xa8 + 0x30, 0, len(ctl), len(code), len(ctl)); d += ctl + code
+    struct.pack_into('<3I', d, 0xa8 + 0x98, 0x40, len(d), 3); d += bytes.fromhex('19292919') + bytes(0x3c)
+    struct.pack_into('<I', d, 0x5c, len(d))
+    return bytes(d)
+
+
 def sdf():
     d = bytearray(0x10 + 0x108); d[:4] = b'SDF\0'; struct.pack_into('<HH', d, 4, 1, 1)
     for slot, (ctl, code) in ((0, VS), (4, PS)):
@@ -111,7 +125,7 @@ def arh1():
 
 def seeds():
     b = bnsh()
-    return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]),
+    return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]), 'glslc-sm8x': glslc_sm8x(),
             'sdf': sdf(), 'arh1': arh1()}
 
 

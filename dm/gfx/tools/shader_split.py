@@ -96,7 +96,9 @@ def zstd_mod():
 
 def ctl_len(ctl):
     """Number of control bytes in the key: control +0x20 holds the section's own length. Every control section of Mario, Fire Emblem Engage, Metroid Dread and 13 Sentinels is at least 0x880 bytes, so the first 0x880 are used;
-    SDK 10's Super Mario 3D World + Bowser's Fury has 2,888 that are only 0x850 bytes (the bfsha in ShaderData, 6 layouts), with other data right after them, so only their own length is used (the same as the host's keys_hash)"""
+    SDK 10's Super Mario 3D World + Bowser's Fury has 2,888 that are only 0x850 bytes (the bfsha in ShaderData, 6 layouts), with other data right after them, so only their own length is used (the same as the host's keys_hash).
+    An SM8x control section (sm8x_ctl) is the whole key: its own length is at +0x30, and +0x20 is part of a hash there"""
+    if sm8x_ctl(ctl): return len(ctl)
     n = struct.unpack_from('<I', ctl, 0x20)[0]
     return n if 0x760 <= n < 0x880 else 0x880
 
@@ -247,6 +249,66 @@ def glslc_program(d, h, size, label):
     if len(secs) < 2 or len(set(sts)) < len(sts) or any(not st or check(label, st, ctl, code) for st, (ctl, code) in zip(sts, secs)): return []
     return [(f'{label}#GLSLC@{h:#x}#var', st, ctl, code) for st, (ctl, code) in zip(sts, secs)]
 
+SM8X_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # SM8x control +0x54 >> 16: NVN's shader stage order (vertex, fragment, geometry, tess control, tess evaluation, compute)
+SM8X_TAG = '#SM8X'   # ends the label of every SM8x shader (glslc_sm8x), so the map's source column shows the architecture; sm8x_ctl tells it from the control section alone
+def sm8x_ctl(ctl):
+    """An SM8x (Volta+ instruction set: Switch 2's Ampere GPU) control section, as the GLSLC of NVN 2 writes it (glslc_sm8x): the control magic, its own length at +0x30, the code area's
+    at +0x44. Maxwell control sections are at least 0x760 bytes (ctl_len), these at most 0x188 (Pokémon Pokopia: 0xd8 in 203,128 of its 213,169 outputs), so the two never meet"""
+    return 0x68 <= len(ctl) < 0x760 and ctl[:4] == CTL_MAGIC and struct.unpack_from('<I', ctl, 0x30)[0] == len(ctl)
+
+def sm8x_facts(ctl):
+    """An SM8x compute shader's thread group (control +0x58, +0x5c, +0x60) and shared memory bytes (+0x64): the fields Maxwell's control keeps at +0x748 and +0x754. Pokémon Pokopia's 3,156
+    distinct compute shaders: the thread group is never 0 (8×8×1, 16×16×1, 32×32×1, 8×8×4 …); +0x64 is non-zero in exactly the 1,544 that use LDS / STS / ATOMS"""
+    return list(struct.unpack_from('<3I', ctl, 0x58)), struct.unpack_from('<I', ctl, 0x64)[0]
+
+def sm8x_check(st, ctl, code):
+    """SM8x control section and code area consistent (the Maxwell triple check's counterpart); returns the reason if not. The code area is the SPH (version 4: 32 words, 0x80 bytes; shader type
+    in word 0 bits 10..13, as before) then the instructions for graphics, the instructions from +0 for compute; then the c1 constant segment, control +0x40 to +0x44 (glslc_sm8x)"""
+    if not sm8x_ctl(ctl): return 'bad SM8x control section'
+    end, _, c1, n = struct.unpack_from('<4I', ctl, 0x38)
+    if n != len(code) or not end <= c1 <= n or n & 0x7f: return 'SM8x control +0x38 / +0x40 / +0x44 do not fit the code area'
+    if st == 'cs': return None if all(sm8x_facts(ctl)[0]) else 'SM8x compute shader with no thread group (control +0x58)'
+    if not sph_v4(code) or SPH_STAGE.get((struct.unpack_from('<I', code, 0)[0] >> 10) & 0xf) != st: return 'the SPH (version 4) at code +0 does not match the control\'s stage'
+    return None
+
+def sph_v4(code):
+    """The code area starts with an SPH of version 4 (Turing and later: 32 words, 0x80 bytes, Mesa NAK sph.rs SPHV4_SHADER_HEADER_SIZE), as SM8x graphics code areas do: word 0 bits 0..4 = SPH type
+    1 (VTG) or 2 (pixel), bits 5..9 = version 4. A Maxwell code area starts with its 0x12345678 / 0x12345679 header (type 0x18 there), never with this"""
+    w = struct.unpack_from('<I', code, 0)[0] if len(code) >= 0x80 else 0
+    return w & 0x1f in (1, 2) and (w >> 5) & 0x1f == 4
+
+def glslc_sm8x(d, h, label):
+    """A GLSLC output of NVN 2 (Switch 2), whose GPU code is SM8x (Volta+ 128-bit instructions), not Maxwell. Found on Pokémon Pokopia (KTGL, SDK 20.5): 213,169 outputs in its G2S and _DOK
+    containers (idrk_shaders), 160 in main, 644 in LD_C0_R.BIN (a LINKDATA pair no reader here takes yet); output version word +0x08 = 0x220015 (3 outputs: 0x220615). Its header is the old one with 0x18 more bytes before the section table:
+    +0x44 (the old whole length) is 0, +0x5c = the whole output's length (the next output starts right there: all 210,137 that have one checked), +0x60 = the first section's data offset
+    (0xa8 + 0x98 n + 0x130), +0x64 = the section count n. Section i's header at +0xa8 + 0x98 i (0x98 bytes, the old 0x90 + 8): {u32 size, u32 data offset (from the output), u32 type},
+    and for type 0 (GPU code) +0x30 control offset, +0x34 code offset (both from the section's data), +0x38 code length, +0x3c control length, as before. Every Pokopia output holds one GPU code
+    section and one reflection section (type 3, starting 0x19292919), 3 a type-4 section too; all 213,169 control sections sit at section data +0, the code area right after them.
+    The control section (sm8x_ctl) is 0xd8..0x188 bytes, no longer 0x880 (Pokopia, every output): +0x04 0xc9, +0x18 / +0x1c = the output's +0x08 / +0x0c, +0x20 a 16-byte hash,
+    +0x30 its own length (again at +0x98), +0x38 the end of the instructions, +0x3c the c1 bytes in use, +0x40 the c1 constant segment's start and +0x44 the code area's length (both from the
+    code area; c1 = 0, 0x100, 0x200, 0x300, 0x400 or 0x800 bytes), +0x54 the stage << 16 (SM8X_STAGES; it agrees with the SPH's shader type in all 209,968 graphics outputs), compute:
+    +0x58 thread group (sm8x_facts), +0x64 shared memory. The code area has no 0x12345678 / 0x12345679 header. Several GPU code sections would be one program, as glslc_program reads them
+    (none in Pokopia). → [(label, stage, control, code)]; the label ends with SM8X_TAG. [] when the header or a section does not read back"""
+    if h + 0xa8 > len(d): return []
+    size, first, n = struct.unpack_from('<3I', d, h + 0x5c)
+    if not 0 < n <= 16 or not 0xa8 + 0x98 * n <= first <= size <= len(d) - h: return []
+    secs = []
+    for i in range(n):
+        s = h + 0xa8 + 0x98 * i
+        ssz, soff, typ = struct.unpack_from('<3I', d, s)
+        if soff < first or soff + ssz > size: return []
+        if typ: continue
+        co, ko, kn, cn = struct.unpack_from('<4I', d, s + 0x30)
+        if co + cn > ssz or ko + kn > ssz or cn < 0x68: return []
+        ctl, code = d[h + soff + co:h + soff + co + cn], d[h + soff + ko:h + soff + ko + kn]
+        if not sm8x_ctl(ctl): return []
+        st = SM8X_STAGES[struct.unpack_from('<I', ctl, 0x54)[0] >> 16] if struct.unpack_from('<I', ctl, 0x54)[0] >> 16 < len(SM8X_STAGES) else None
+        if not st or sm8x_check(st, ctl, code): return []
+        secs.append((st, ctl, code))
+    if len({st for st, _, _ in secs}) < len(secs): return []   # two sections of one stage: not a program
+    var = '#var' if len(secs) > 1 else ''
+    return [(f'{label}#GLSLC@{h:#x}{var}{SM8X_TAG}', st, ctl, code) for st, ctl, code in secs]
+
 def glslc_shaders(d, label, need=True, skip=()):
     """GLSLC compiler outputs (838 in 13 Sentinels' main read-only segment, one stage each): from the magic 0x19866891, +0x44 = the whole output's length; an output of one stage holds exactly one control section with the code area right after it (control +0x20 = control length),
     one of several stages is read by its section headers (glslc_program).
@@ -255,12 +317,14 @@ def glslc_shaders(d, label, need=True, skip=()):
     need: stop when there is none (a capture file); a Koei Tecmo G2S container (idrk_shaders) or a main may hold none.
     SDK 6's GLSLC (output version 0x1d.2, Fire Emblem: Three Houses) writes 0x848- and 0x850-byte control sections (ctl_len's lower range) and compute code with no 0x12345679 header: the instructions
     start at code +0 (the first word is a scheduling word), and the stage then comes from the control's thread group (+0x748), which only compute sections fill. Its few version-0x1d.0 outputs keep
-    something else at control +0x20 (odd values such as 0x136b), so a length that is not a multiple of 4 is not a control length"""
+    something else at control +0x20 (odd values such as 0x136b), so a length that is not a multiple of 4 is not a control length.
+    NVN 2's GLSLC (Switch 2: SM8x code) leaves +0x44 at 0; glslc_sm8x reads those outputs"""
     out = []
     for m in re.finditer(b'\x91\x68\x86\x19', d):
         if any(a <= m.start() < b for a, b in skip): continue
         if m.start() + 0x48 > len(d): continue
         h = m.start(); size = struct.unpack_from('<I', d, h + 0x44)[0]
+        if not size: out += glslc_sm8x(d, h, label); continue   # NVN 2's GLSLC keeps the length at +0x5c (SM8x code); every output with 0 here was skipped before
         c = d.find(CTL_MAGIC, h, h + size) if 0x760 < size <= len(d) - h else -1
         if c < 0: continue
         if d.find(CTL_MAGIC, c + 4, h + size) >= 0:
@@ -1516,6 +1580,7 @@ def raw_shaders(d, label, known=()):
     for m in re.finditer(b'\x91\x68\x86\x19', d):
         size = struct.unpack_from('<I', d, m.start() + 0x44)[0]
         if 0x760 < size <= len(d) - m.start(): skip.append((m.start(), m.start() + size))
+        elif not size and glslc_sm8x(d, m.start(), label): skip.append((m.start(), m.start() + struct.unpack_from('<I', d, m.start() + 0x5c)[0]))   # NVN 2's outputs: the length at +0x5c (Pokémon Pokopia's main: 160)
     for m in re.finditer(b'BNSH\0\0\0\0', d): skip.append((m.start(), m.start() + struct.unpack_from('<I', d, m.start() + 0x1c)[0]))
     ctls = [c for m in re.finditer(re.escape(CTL_MAGIC), d) if not (c := m.start()) & 3 and not any(a <= c < b for a, b in skip) and d[c:c + struct.unpack_from('<I', d, c + 0x20)[0]] not in known]
     if not ctls: return []
@@ -2208,8 +2273,10 @@ def group(label):
     return 'other'
 
 def ps_inputs(code):
-    """Generic attributes a pixel shader reads: SPH words 6–13 are the input map, 8 bits for each of the 32 attributes (Ryujinx ShaderHeader.ImapTypes), non-zero = read; the translated MSL inputs are exactly user(locn<attribute>)"""
-    return {i for i in range(32) if struct.unpack_from('<I', code, 0x30 + 4 * (6 + (i >> 2)))[0] >> ((i & 3) * 8) & 0xff}
+    """Generic attributes a pixel shader reads: SPH words 6–13 are the input map, 8 bits for each of the 32 attributes (Ryujinx ShaderHeader.ImapTypes), non-zero = read; the translated MSL inputs are exactly user(locn<attribute>).
+    The SPH follows the code area's 0x30-byte header; an SM8x code area has no header, its SPH (version 4, the same words 6–13: Mesa NAK sph.rs) is at +0 (sph_v4)"""
+    o = 0 if sph_v4(code) else 0x30
+    return {i for i in range(32) if struct.unpack_from('<I', code, o + 4 * (6 + (i >> 2)))[0] >> ((i & 3) * 8) & 0xff}
 
 def pixel_input_cover(shaders):
     """{pixel key: code} → a deterministic greedy cover of their generic inputs; ties take the smaller key."""
@@ -2515,7 +2582,7 @@ def main():
         if rec.count(b'BTCDBTCD') != 1: red(f'key {key}: the record separator appears inside the record')
         rows.append((name, len(recs[name]), STAGE_NAME[st], key, where)); recs[name].append(bytes(rec)); stat[st] += 1
         if st == 'cs':
-            x, y, z = struct.unpack_from('<3I', ctl, 0x748); sh = struct.unpack_from('<I', ctl, 0x754)[0]
+            (x, y, z), sh = sm8x_facts(ctl) if sm8x_ctl(ctl) else (struct.unpack_from('<3I', ctl, 0x748), struct.unpack_from('<I', ctl, 0x754)[0])
             if not x * y * z: red(f'compute shader {key}: control +0x748 thread group is 0 ({where})')
             facts[key] = {'local': [x, y, z], 'shared': (sh + 15) // 16 * 16}
     for name, rr in recs.items():
