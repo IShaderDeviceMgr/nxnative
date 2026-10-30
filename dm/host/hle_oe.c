@@ -164,6 +164,13 @@ HLE_FORCE("_ZN2nn2oe34DisableAlbumImageTakenNotificationEv", "screenshot-taken n
 // the SDK otherwise dereferences the absent am SelfController at sdk+0x33b0f0.
 // As with Disable, there is no producer: the host has no Horizon album captures.
 HLE_FORCE("_ZN2nn2oe33EnableAlbumImageTakenNotificationEv", "screenshot-taken notifications (through am); the host takes no system screenshots", void, h_oe_AlbumNotifyOn, void) {}
+// Graphics scale (Switch 2 SDK 20.5.19; Donkey Kong Bananza calls both at main+0x549324 / main+0x544f48, Pokemon Pokopia imports the same two). The SDK reads it through the am
+// IGraphicsScalingParametersFunctions interface the host does not serve: nn::am::GetGraphicsScalingParametersFunctions() returns null and sdk+0x517a7c (GetGraphicsScalingParameters) reads [x0].
+// GetCurrentGraphicsScale (sdk+0x5179a0) maps the parameters' first word: SDK scale 10 -> 0, 20 -> 1, 30 -> 2, anything else aborts (UnexpectedDefaultImpl).
+// Bananza uses the value as a quality tier: byte tier 0/1/2 at its settings +0x1c7 and a float from the table main+0x1d1a604 (3.0, 12.0, 16.0), so the highest, 2 (SDK 30), is the full-quality tier.
+// The scale never changes on the host, so the change notification switch (a void SDK call that only tells am) has nothing to do.
+HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (through am): the highest tier, 2 (SDK scale 30); the host renders at full quality", int, h_oe_GfxScale, void) { return 2; }
+HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification switch (through am); the scale never changes on the host", void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
 HLE_FORCE("_ZN2nn2oe24IsInStoreDemoModeEnabledEv", "retail store demo mode (through am); never", unsigned, h_oe_StoreDemo, void) { return 0; }
 HLE_FORCE("_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi", "set the CPU/GPU clock config; the host does not scale clocks", void, h_oe_SetPerfCfg, int mode, int cfg) {
     LOG("oe::SetPerformanceConfiguration mode=%d cfg=%#x (ignored)", mode, cfg);

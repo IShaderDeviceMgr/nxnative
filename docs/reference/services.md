@@ -490,6 +490,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md) (one of two causes of the freeze; the other is [Guest clock reads wait while the app is in the background](#guest-clock-reads-wait-while-the-app-is-in-the-background)).
 - **Note:** modes seen: 1 Monster Hunter Rise; 2 Wonder, Breath of the Wild, Tears of the Kingdom, Link's Awakening, Cuphead; 3 Galaxy, Galaxy 2, 3D World, Odyssey.
 
+### Graphics scale (`nn::oe::GetCurrentGraphicsScale`)
+
+- **Symptom:** null read (`addr=0`) at `sdk+0x517a7c`, in `nn::oe::GetGraphicsScalingParameters`, reached from the game's call to `GetCurrentGraphicsScale` (`main+0x549324`) during start-up.
+- **Cause:** the SDK asks the am `IGraphicsScalingParametersFunctions` interface for the graphics scaling parameters (`{u32 scale, u32 ratio numerator, u32 ratio denominator}`). `nn::am::GetGraphicsScalingParametersFunctions()` returns null because the host serves no applet interfaces. `GetCurrentGraphicsScale` maps the SDK scale 10 / 20 / 30 to 0 / 1 / 2 and aborts on any other value.
+- **Fix:** `hle_oe.c` replaces `GetCurrentGraphicsScale` with the highest tier, 2 (SDK scale 30), the full-quality one (Donkey Kong Bananza reads it as a quality tier: a byte 0 / 1 / 2 and a float from the table 3.0 / 12.0 / 16.0), and `SetGraphicsScaleChangedNotificationEnabled` with a no-op: the scale never changes on the host.
+- **Found on:** Donkey Kong Bananza (Switch 2, SDK 20.5.19); Pokémon Pokopia imports the same two calls.
+
 ### Album calls fail with no album
 
 - **Symptom:** abort in `sm::Initialize` under `capsrv::InitializeForApplication` (`album::Initialize`); calls that reach the album service, found in the imports before they were met.
