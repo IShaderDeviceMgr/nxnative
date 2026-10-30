@@ -2338,6 +2338,30 @@ NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { (
 NVN(nvnCommandBufferGetCommandMemoryFree, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c; return m->cur && m->end > m->cur ? (size_t)(m->end - m->cur) : 0; }
 NVN(nvnCommandBufferGetCommandMemorySize, size_t, const NVNcommandBuffer *c) { return h_nvnCommandBufferGetCommandMemoryUsed(c) + h_nvnCommandBufferGetCommandMemoryFree(c); }
 NVN_NOPROTO(nvnCommandBufferSetCommandMemoryCallbackEnabled, void, NVNcommandBuffer *c, uint32_t on) { (void)c; (void)on; }
+// NVN 2 (Switch 2) command buffer modes. Found on Donkey Kong Bananza (SDK 20.5.19): called by the game's command-list code; the host has no header for them.
+// SetRecordingMode(cb, mode): mode 0 on most calls (about 120), mode 1 from one call site, main+0x2ef278 (a command buffer embedded at +0x188 of a larger object, set when a global flag is 0, just before it records).
+// The meaning of mode 1 is OPEN (possibly related to the NVN 2 device command path, BeginDeviceCommands / EndDeviceCommands, DeviceCommandBuffer*). It is recorded in the command buffer and not acted on:
+// commands are recorded and replayed exactly as in mode 0, which is how the game ran (and drew its first dialog) while this was an unimplemented stub.
+NVN_NOPROTO(nvnCommandBufferSetRecordingMode, void, NVNcommandBuffer *c, uint32_t mode) {
+    CB(c)->rec_mode = mode;
+    if (mode) ONCE_LOG("[RED] SetRecordingMode %u (Bananza main+0x2ef278): its meaning is unknown (open); recorded, not acted on", mode);
+}
+// SetGeometryProcessingMode(cb, mode): always 0 (the default) in 76 calls on Donkey Kong Bananza; 0 needs nothing. A non-zero value would change the geometry pipeline, so it is reported.
+NVN_NOPROTO(nvnCommandBufferSetGeometryProcessingMode, void, NVNcommandBuffer *c, uint32_t mode) {
+    (void)c; if (mode) ONCE_LOG("[RED] SetGeometryProcessingMode %u: only the default 0 is known (open); ignored", mode);
+}
+// SetComputeOverlapMode(cb, mode): mode 1 in the 8 calls on Bananza; whether compute work may overlap graphics work is a GPU scheduling hint with no effect on results (Metal orders by its own barriers)
+NVN_NOPROTO(nvnCommandBufferSetComputeOverlapMode, void, NVNcommandBuffer *c, uint32_t mode) { (void)c; (void)mode; }
+// SetStencilCullCriteria(cb, func, mask): a stencil-based early cull optimisation hint (values seen on Bananza: func 3, mask 0xff); results do not depend on it
+NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int func, uint32_t mask) { (void)c; (void)func; (void)mask; }
+// PushGraphicsConstants / PushComputeConstants: signature unconfirmed (x1, x2 are the two arguments after the command buffer). Donkey Kong Bananza (SDK 20.5.19) passes x1 = 0, x2 = 0 in every call seen
+// (graphics: first scene after the dialog; compute: 10 calls, 3 minutes of play), which pushes no data. Real push constants would need the shader side, so a non-zero argument is reported and ignored (open).
+NVN_NOPROTO(nvnCommandBufferPushGraphicsConstants, void, NVNcommandBuffer *c, uint64_t a, uint64_t b) {
+    (void)c; if (a || b) ONCE_LOG("[RED] PushGraphicsConstants %#llx %#llx: non-zero push constants are not implemented (open)", (unsigned long long)a, (unsigned long long)b);
+}
+NVN_NOPROTO(nvnCommandBufferPushComputeConstants, void, NVNcommandBuffer *c, uint64_t a, uint64_t b) {
+    (void)c; if (a || b) ONCE_LOG("[RED] PushComputeConstants %#llx %#llx: non-zero push constants are not implemented (open)", (unsigned long long)a, (unsigned long long)b);
+}
 
 // nvnProgramSetShadersExt (NVN 55): each stage is 0x18 bytes = NVNshaderData{data, control} + one 8-byte extension field (filled from SMBW main 0x1074ff0).
 // The host identifies stages by the control section and does not use the extension field: convert to plain NVNshaderData and hand it to SetShaders.
