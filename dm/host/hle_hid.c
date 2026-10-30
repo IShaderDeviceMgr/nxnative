@@ -513,6 +513,15 @@ HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "mouse states: 0 ent
 HLE_FORCE("_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateE", "mouse state: not connected (MouseState 0x28 bytes zeroed)", void, h_hid_MouseState, void *s) {
     memset(s, 0, 0x28); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;
 }
+// Joy-Con as a mouse (Jcms, new with Switch 2; Donkey Kong Bananza, SDK 20.5.19). InitializeJcms hands the game's 0x4000-byte buffer to the sdk, which makes transfer memory of it and
+// registers it with the hid service through its own session (the host does not serve hid; crash at sdk+0x654c6c in detail::InitializeJcms). The host reports no Joy-Con used as a mouse.
+// The public wrappers return void (they abort on a failed Result), GetJcmsHandle returns the 4-byte handle {npad id u8, type u8} in w0, GetJcmsStates the number of states written
+HLE_FORCE("_ZN2nn3hid14InitializeJcmsEPvm", "Joy-Con mouse; not provided by the host", void, h_hid_InitJcms, void *buf, unsigned long size) { (void)buf; (void)size; }
+HLE_FORCE("_ZN2nn3hid12FinalizeJcmsEv", "Joy-Con mouse: finalize", void, h_hid_FinJcms, void) {}
+HLE_FORCE("_ZN2nn3hid13GetJcmsHandleERKjRKNS0_8JcmsTypeE", "Joy-Con mouse: handle {npad id, type}", unsigned, h_hid_JcmsHandle, const unsigned *id, const uint8_t *type) { return (*id & 0xff) | ((unsigned)*type << 8); }
+HLE_FORCE("_ZN2nn3hid9StartJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse: start", void, h_hid_StartJcms, const unsigned *h) { (void)h; }
+HLE_FORCE("_ZN2nn3hid8StopJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse: stop", void, h_hid_StopJcms, const unsigned *h) { (void)h; }
+HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy-Con mouse states: 0 entries", int, h_hid_JcmsStates, void *out, int n, const unsigned *h) { (void)out; (void)n; (void)h; return 0; }
 HLE_FORCE("_ZN2nn3hid18InitializeKeyboardEv", "keyboard; not provided by the host", void, h_hid_InitKbd, void) {}
 HLE_FORCE("_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE", "keyboard state: not connected (KeyboardState 0x30 bytes zeroed)", void, h_hid_KbdState, void *s) {
     memset(s, 0, 0x30); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;

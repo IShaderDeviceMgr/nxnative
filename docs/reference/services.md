@@ -54,6 +54,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_sf.c` takes over the SDK's HIPC client entry points (`InitializeHipcServiceResolution`, `ConnectToHipcService`, `SendSyncRequest`, `CloseClientSessionHandle` and the control requests `QueryPointerBufferSize`, `ConvertSessionToDomain`, `DuplicateSession(Ex)`): a service it serves (`olsc:u`) gets a host session, and every request on it succeeds with zeroed output, which reads as backup off for every user. Any other name is refused with a red line, as `sm` refuses a service nobody registered (`npns` was never connected). `DM_SF_TRACE=1` dumps each request.
 - **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4).
 
+### Joy-Con as a mouse (`nn::hid::*Jcms`) registers transfer memory with `hid` directly
+
+- **Symptom:** right after `hid supported controller styles`, `SVC 0x15` (CreateTransferMemory, a 0x4000-byte buffer) is answered by the placeholder, then `[RED] sf: the game connects to service hid itself, which the host does not serve` and a null-pointer crash at `sdk+0x654c6c`.
+- **Cause:** `nn::hid::InitializeJcms(void*, unsigned long)` (the Joy-Con used as a mouse, new with Switch 2) is inside `detail::InitializeJcms`: the SDK makes transfer memory of the game's buffer and registers it through its own session to the `hid` service, which the host does not serve (it replaces the nn::hid functions by symbol). The public wrappers `InitializeJcms`, `FinalizeJcms`, `StartJcms` and `StopJcms` return `void` (they abort on a failed `Result`), `GetJcmsHandle` returns the 4-byte handle `{npad id u8, type u8}` in `w0`, and `GetJcmsStates` returns the number of states written.
+- **Fix:** `hle_hid.c` hooks the six public entry points as "no Joy-Con is used as a mouse": initialize, finalize, start and stop do nothing, `GetJcmsHandle` builds the handle, `GetJcmsStates` writes nothing and returns 0. A Switch 1 game never imports them.
+- **Found on:** Donkey Kong Bananza (Switch 2, SDK 20.5.19; no game note yet). The next blocker is graphics (NVN 2 functions the host does not implement yet).
+
 ## SDK names that changed between versions
 
 ### Older SDK names for the same calls
