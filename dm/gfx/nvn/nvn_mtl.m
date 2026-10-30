@@ -3586,7 +3586,7 @@ static void shmap_load(void) {
 #include "nvn_pso_skey.h"
 #include "nvn_geometry.h"
 #include "nvn_feedback.h"
-@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; } @end   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
+@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17], cs_key[17]; NvProg *geo_raster, *geo_lean_raster; } @end   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
 @implementation NvProg @end
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs are strong references (in pso they are only raw pointers, and the background dictionary is released when the task ends)
 @interface WarmItem : NSObject { @public int kind; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; } @end
@@ -3906,6 +3906,7 @@ static NvShader *builtin_get(const char *ctl) {
     }
     return nil;
 }
+static int nnu_keyed(const char *key);   // a compute shader the profile's nn_upscale replaces (no library by design)
 static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only on the submit thread
     prog_t *p = (prog_t *)cp;
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly
@@ -3934,7 +3935,8 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
         }
         int st = stage_of(stage);
         NvShader *sh = st >= 0 ? shader_get([k stringByAppendingString:@"_b"], st) : nil;
-        if (sh) o->sh[st] = sh; else MLOG("[RED] shader %s (%s) failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first", k.UTF8String, stage.UTF8String);
+        if (st == 5) strlcpy(o->cs_key, k.UTF8String, sizeof o->cs_key);   // kept for a compute shader without a library too (nn_upscale_dispatch)
+        if (sh) o->sh[st] = sh; else if (!(st == 5 && nnu_keyed(k.UTF8String))) MLOG("[RED] shader %s (%s) failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first", k.UTF8String, stage.UTF8String);
         if (!sh && st == 2) strlcpy(o->gs_miss, k.UTF8String, sizeof o->gs_miss);
     }
     prog_fold_gs(o);   // a slice-writing geometry shader: the vertex shader's layer entry points instead
@@ -9459,6 +9461,89 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
     args_dirty_all();
     return e;
 }
+// ---------- Neural-network upscale replaced by MetalFX (profile key nn_upscale, Switch 2 games) ----------
+// Donkey Kong Bananza renders its 3D scene at a reduced size and upscales it with NDSR (SDK component SMAA_For_NDSR, agl_ndsr.pck): one compute dispatch a frame (44x33x1 groups) that reads
+// the scene as compute texture slot 0 and writes the image the final pass samples as compute image slot 1. The network runs on tensor cores (HMMA / MOVM / LDSM, 1,792 instructions in
+// the shader 16c744ac488a67bd) that neither the SM8x translator nor the Mac has; without it the dispatch was dropped and the 3D scene never reached the screen. This is a DELIBERATE SUBSTITUTION,
+// not a translation: the cause (no tensor cores) cannot be fixed at its source, and the game has no usable non-network path (its dynamic-resolution controller keeps the ratio between 1.375
+// and 1.9; forcing its SMAA-only bypass gives black). The keys the profile lists are replaced by MetalFX's spatial scaler: the picture is MetalFX's, not the network's. The dispatch's
+// 32 bytes of push constants (uniform slot DMSH_PUSH_UBO_REG of the compute stage, hle_nvn.c push_constants) are two inclusive rectangles of ints, x0 y0 x1 y1: first the content in the
+// input (the input texture is larger than the content, as the scale is dynamic), then the region of the output it fills (docs/reference/rendering.md, "A neural-network upscale replaced by MetalFX").
+// The scaler's input texture is a private copy of the whole slot-0 texture's size (the content copied to its origin, as the present's fx_encode does) and its output a private texture of the
+// output rectangle's size, copied into the image: the game's textures need no MetalFX usage flags. One scaler per (input size and format, output size and format).
+typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; NSUInteger key[6]; } nnu_state;
+static nnu_state g_nnu;
+static id<MTL4Compiler> g_fx_comp;   // shared with the present's scaler (fx_encode)
+static int nnu_keyed(const char *key) {
+    static char keys[40][20]; static int n = -1;
+    if (n < 0) { n = 0; const char *src = DM_GAME_NN_UPSCALE; for (const char *q = src; *q && n < 40;) { size_t l = strcspn(q, " "); if (l) { if (l > 16) l = 16; memcpy(keys[n], q, l); keys[n++][l] = 0; } q += l; q += strspn(q, " "); }
+        if (n) MLOG("neural-network upscale: %d compute shaders (profile key nn_upscale) are replaced by MetalFX's spatial scaler", n); }
+    for (int i = 0; i < n; i++) if (!strncmp(key, keys[i], 16)) return 1;
+    return 0;
+}
+// Returns 1 when cs is a listed shader (the dispatch is done here, or skipped with a red line), 0 for any other
+static int nn_upscale_dispatch(const char *key) {
+#if DM_GAME_SWITCH2
+    if (!DM_GAME_NN_UPSCALE[0] || !nnu_keyed(key)) return 0;
+    static int once; if (!once++) MLOG("neural-network upscale %s replaced by a MetalFX spatial upscale (no tensor cores on this GPU)", key);
+    if (!g_q4 || ![MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]) { RED_ONCE(128, "neural-network upscale %s: this GPU has no Metal 4 MetalFX spatial scaler; dispatch dropped", key); return 1; }
+    const p_bind_buf *u = &S.ubo[5][DMSH_PUSH_UBO_REG];
+    int32_t *pc = NULL; void *ub; uint64_t uo;
+    if (u->size >= 32 && mtl_addr(u->addr, 32, &ub, &uo)) pc = (int32_t *)(u->addr);   // the push ring is host memory (push_constants)
+    int tid0 = (int)(S.tex[5][0] & 0xfffff), tid1 = (int)(S.img[5][1] & 0xfffff);
+    if (!pc || tid0 <= 0 || tid1 <= 0) { RED_ONCE(129, "neural-network upscale %s: no push constants (uniform slot %d), texture slot 0 or image slot 1 bound; dispatch dropped", key, DMSH_PUSH_UBO_REG); return 1; }
+    int32_t r[8]; memcpy(r, pc, 32);
+    id<MTLTexture> ti = nil, to = nil;
+    os_unfair_lock_lock(&g_rmu);
+    if (tid0 < g_ntreg && g_treg[tid0].ok) { tex_t t = g_treg[tid0].t; ti = tex_mtl(&t); }
+    if (tid1 < g_ntreg && g_treg[tid1].ok) { tex_t t = g_treg[tid1].t; t.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; to = tex_mtl(&t); }
+    os_unfair_lock_unlock(&g_rmu);
+    while (ti.parentTexture) ti = ti.parentTexture;
+    while (to.parentTexture) to = to.parentTexture;
+    NSUInteger cw = r[2] - r[0] + 1, ch = r[3] - r[1] + 1, ow = r[6] - r[4] + 1, oh = r[7] - r[5] + 1;
+    if (!ti || !to || r[0] < 0 || r[1] < 0 || r[4] < 0 || r[5] < 0 || r[2] < r[0] || r[3] < r[1] || r[6] < r[4] || r[7] < r[5] || r[2] >= (int)ti.width || r[3] >= (int)ti.height
+        || r[6] >= (int)to.width || r[7] >= (int)to.height || ow < cw || oh < ch || ti.textureType != MTLTextureType2D || to.textureType != MTLTextureType2D) {
+        RED_ONCE(129, "neural-network upscale %s: implausible rectangles (%d %d %d %d) -> (%d %d %d %d) for the %lux%lu input and %lux%lu image; dispatch dropped", key, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+                 (unsigned long)ti.width, (unsigned long)ti.height, (unsigned long)to.width, (unsigned long)to.height);
+        return 1;
+    }
+    NSUInteger skey[6] = {ti.width, ti.height, ti.pixelFormat, ow, oh, to.pixelFormat};
+    if (!g_nnu.sc || memcmp(skey, g_nnu.key, sizeof skey)) {
+        static NSUInteger refused[6]; if (!memcmp(skey, refused, sizeof skey)) return 1;
+        NSError *e = nil; if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
+        MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
+        d.colorTextureFormat = ti.pixelFormat; d.outputTextureFormat = to.pixelFormat; d.inputWidth = ti.width; d.inputHeight = ti.height; d.outputWidth = ow; d.outputHeight = oh;
+        d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+        id<MTL4FXSpatialScaler> sc = g_fx_comp ? [d newSpatialScalerWithDevice:g_dev compiler:g_fx_comp] : nil;
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:ti.pixelFormat width:ti.width height:ti.height mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate; if (sc) td.usage = sc.colorTextureUsage | MTLTextureUsageShaderRead;
+        id<MTLTexture> in = sc ? [g_dev newTextureWithDescriptor:td] : nil;
+        td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:to.pixelFormat width:ow height:oh mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate; if (sc) td.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead;
+        id<MTLTexture> out = sc ? [g_dev newTextureWithDescriptor:td] : nil;
+        if (!sc || !in || !out) { memcpy(refused, skey, sizeof skey);
+            MLOG("[RED] neural-network upscale: MetalFX makes no spatial scaler for %lux%lu format %lu -> %lux%lu format %lu; dispatch dropped", (unsigned long)ti.width, (unsigned long)ti.height,
+                 (unsigned long)ti.pixelFormat, (unsigned long)ow, (unsigned long)oh, (unsigned long)to.pixelFormat); return 1; }
+        in.label = @"nn upscale input"; out.label = @"nn upscale output";
+        defer_obj_release(g_nnu.in); defer_obj_release(g_nnu.out);   // a replaced scaler's textures may still be on the GPU
+        res_add(in); res_add(out); res_commit();
+        g_nnu.sc = sc; g_nnu.in = in; g_nnu.out = out; memcpy(g_nnu.key, skey, sizeof skey);
+        MLOG("neural-network upscale: MetalFX spatial scaler, input texture %lux%lu format %lu (content %lux%lu), output %lux%lu format %lu", (unsigned long)ti.width, (unsigned long)ti.height,
+             (unsigned long)ti.pixelFormat, (unsigned long)cw, (unsigned long)ch, (unsigned long)ow, (unsigned long)oh, (unsigned long)to.pixelFormat);
+    }
+    rp_end();
+    id<MTL4ComputeCommandEncoder> ce = blit();   // after everything the frame holds so far: the content is copied to the scaler's input
+    [ce copyFromTexture:ti sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0], r[1], 0) sourceSize:MTLSizeMake(cw, ch, 1) toTexture:g_nnu.in destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    enc_b_end(g_blit); g_blit = nil;   // the end barrier orders the scaler's encoders after the copy
+    g_nnu.sc.colorTexture = g_nnu.in; g_nnu.sc.inputContentWidth = cw; g_nnu.sc.inputContentHeight = ch; g_nnu.sc.outputTexture = g_nnu.out;
+    [g_nnu.sc encodeToCommandBuffer:(id<MTL4CommandBuffer>)g_cb];
+    ce = blit();   // its opening barrier orders this copy after the scaler
+    [ce copyFromTexture:g_nnu.out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(ow, oh, 1) toTexture:to destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(r[4], r[5], 0)];
+    return 1;
+#else
+    (void)key; return 0;
+#endif
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
@@ -9468,6 +9553,7 @@ static void dispatch(const p_dispatch *dp) {
     if (dp->ind && !mtl_gpu_addr(dp->ind, 12, &ib, &io, &ig)) { RED_ONCE(94, "indirect dispatch skipped: argument address %#llx is in no memory pool", (unsigned long long)dp->ind); return; }
     if (dp->ind) { static int once; if (!once++) MLOG("indirect dispatch: first time (the GPU reads the threadgroup counts from %#llx)", (unsigned long long)dp->ind); }
     NvShader *cs = prog_get(S.cprog)->sh[5];
+    if (!cs && nn_upscale_dispatch(prog_get(S.cprog)->cs_key)) return;   // Switch 2: a listed neural-network upscale, run as a MetalFX spatial upscale
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
@@ -10841,7 +10927,6 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 #define FX_REMAKE_PRESENTS 30
 typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at; int made; NSUInteger refused[6]; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
-static id<MTL4Compiler> g_fx_comp;
 static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
 static int fx_mode(void) {
     if (g_fx_mode >= 0) return g_fx_mode;
