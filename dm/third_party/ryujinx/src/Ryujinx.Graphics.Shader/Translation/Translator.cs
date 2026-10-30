@@ -10,6 +10,7 @@ namespace Ryujinx.Graphics.Shader.Translation
     {
         private const int ThreadsPerWarp = 32;
         private const int HeaderSize = 0x50;
+        private const int Sm8xHeaderSize = 0x80;   // nxnative: SPH version 4 (Mesa NAK sph.rs SPHV4_SHADER_HEADER_SIZE, 32 words); its first 20 words are laid out as version 3's
 
         internal readonly struct FunctionCode
         {
@@ -31,13 +32,15 @@ namespace Ryujinx.Graphics.Shader.Translation
             int localMemorySize;
             ShaderDefinitions definitions;
             DecodedProgram program;
+            bool sm8x = options.Flags.HasFlag(TranslationFlags.Sm8x);
+            int headerSize = sm8x ? Sm8xHeaderSize : HeaderSize;
 
             if (options.Flags.HasFlag(TranslationFlags.Compute))
             {
                 definitions = CreateComputeDefinitions(gpuAccessor);
                 localMemorySize = gpuAccessor.QueryComputeLocalMemorySize();
 
-                program = Decoder.Decode(definitions, gpuAccessor, address);
+                program = sm8x ? Decoder.DecodeSm8x(definitions, gpuAccessor, address) : Decoder.Decode(definitions, gpuAccessor, address);
             }
             else
             {
@@ -46,7 +49,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 definitions = CreateGraphicsDefinitions(gpuAccessor, header);
                 localMemorySize = GetLocalMemorySize(header);
 
-                program = Decoder.Decode(definitions, gpuAccessor, address + HeaderSize);
+                program = sm8x ? Decoder.DecodeSm8x(definitions, gpuAccessor, address + Sm8xHeaderSize) : Decoder.Decode(definitions, gpuAccessor, address + HeaderSize);
             }
 
             ulong maxEndAddress = 0;
@@ -62,7 +65,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
             }
 
-            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : HeaderSize);
+            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : headerSize);
 
             return new TranslatorContext(address, size, localMemorySize, definitions, gpuAccessor, options, program);
         }
@@ -170,7 +173,14 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                     context.EnterBlock(block.Address);
 
-                    EmitOps(context, block);
+                    if (translatorContext.Options.Flags.HasFlag(TranslationFlags.Sm8x))
+                    {
+                        EmitOpsSm8x(context, block);
+                    }
+                    else
+                    {
+                        EmitOps(context, block);
+                    }
                 }
 
                 functions[index] = new(context.GetOperations());
@@ -393,6 +403,72 @@ namespace Ryujinx.Graphics.Shader.Translation
                 context.CurrOp = op;
 
                 op.Emitter?.Invoke(context);
+
+                if (predSkipLbl != null)
+                {
+                    context.MarkLabel(predSkipLbl);
+                }
+            }
+        }
+
+        // nxnative: EmitOps for SM8x instructions: the predicate is in bits 12..15, a branch combines it with its own condition (Sm8xBra), and the CFG has no
+        // SYNC/BRK pops (Decoders/Sm8x/Sm8xDecoder.cs). An instruction with no emitter stops the translation, naming the opcode
+        private static void EmitOpsSm8x(EmitterContext context, Block block)
+        {
+            for (int opIndex = 0; opIndex < block.OpCodes.Count; opIndex++)
+            {
+                InstOp op = block.OpCodes[opIndex];
+                Decoders.Sm8x.Sm8xInst inst = new(op);
+                Decoders.Sm8x.Sm8xTable.Entry entry = Decoders.Sm8x.Sm8xTable.Get(inst.Opcode);
+
+                if (context.TranslatorContext.Options.Flags.HasFlag(TranslationFlags.DebugMode))
+                {
+                    context.Add(new CommentNode($"0x{op.Address:X6}: 0x{op.RawOpCodeHi & 0x1FFFFFFFFFF:X11}{op.RawOpCode:X16} {Decoders.Sm8x.Sm8xTable.GetName(inst.Opcode)}"));
+                }
+
+                if (Decoders.Sm8x.Sm8xTable.IsNever(inst))
+                {
+                    continue;
+                }
+
+                if (op.Emitter == null)
+                {
+                    throw new NotSupportedException($"SM8x opcode 0x{inst.Opcode:x3} ({Decoders.Sm8x.Sm8xTable.GetName(inst.Opcode)}) at 0x{op.Address:x} has no emitter");
+                }
+
+                Operand predSkipLbl = null;
+                bool noPred = entry.Kind is Decoders.Sm8x.Sm8xKind.Branch or Decoders.Sm8x.Sm8xKind.Exit or Decoders.Sm8x.Sm8xKind.Kill;
+
+                if (inst.Pred != RegisterConsts.PredicateTrueIndex && !noPred)
+                {
+                    Operand label;
+
+                    if (opIndex == block.OpCodes.Count - 1 && block.HasNext())
+                    {
+                        label = context.GetLabel(block.Successors[0].Address);
+                    }
+                    else
+                    {
+                        label = Label();
+
+                        predSkipLbl = label;
+                    }
+
+                    Operand pred = Register(inst.Pred, RegisterType.Predicate);
+
+                    if (inst.PredInv)
+                    {
+                        context.BranchIfTrue(label, pred);
+                    }
+                    else
+                    {
+                        context.BranchIfFalse(label, pred);
+                    }
+                }
+
+                context.CurrOp = op;
+
+                op.Emitter(context);
 
                 if (predSkipLbl != null)
                 {

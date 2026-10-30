@@ -20,6 +20,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstAld op = context.GetOp<InstAld>();
 
+            EmitAld(context, op.Dest, (int)op.AlSize + 1, op.Imm11, op.SrcA, op.SrcB, op.Phys, op.P, op.O);
+        }
+
+        // nxnative: ALD's body, shared with SM8x ALD (InstEmitSm8x), which keeps the same fields in other bits
+        private static void EmitAld(EmitterContext context, int aldDest, int count, int aldAttr, int aldRa, int aldRb, bool aldPhys, bool aldPatch, bool aldOutput)
+        {
+            AldFields op = new(aldDest, aldAttr, aldRa, aldRb, aldPhys, aldPatch, aldOutput);
+
             // Some of those attributes are per invocation,
             // so we should ignore any primitive vertex indexing for those.
             bool hasPrimitiveVertex = AttributeMap.HasPrimitiveVertex(context.TranslatorContext.Definitions.Stage, op.O) && !op.P;
@@ -31,7 +39,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand primVertex = hasPrimitiveVertex ? context.Copy(GetSrcReg(context, op.SrcB)) : null;
 
-            for (int index = 0; index < (int)op.AlSize + 1; index++)
+            for (int index = 0; index < count; index++)
             {
                 Register rd = new(op.Dest + index, RegisterType.Gpr);
 
@@ -106,7 +114,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstAst op = context.GetOp<InstAst>();
 
-            for (int index = 0; index < (int)op.AlSize + 1; index++)
+            EmitAst(context, op.SrcB, (int)op.AlSize + 1, op.Imm11, op.SrcA, op.Phys, op.P);
+        }
+
+        // nxnative: AST's body, shared with SM8x AST (InstEmitSm8x)
+        private static void EmitAst(EmitterContext context, int astData, int count, int astAttr, int astRa, bool astPhys, bool astPatch)
+        {
+            AstFields op = new(astData, astAttr, astRa, astPhys, astPatch);
+
+            for (int index = 0; index < count; index++)
             {
                 if (op.SrcB + index > RegisterConsts.RegisterZeroIndex)
                 {
@@ -146,6 +162,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void Ipa(EmitterContext context)
         {
             InstIpa op = context.GetOp<InstIpa>();
+
+            EmitIpa(context, op.Dest, op.Imm10, op.Idx, op.SrcA, op.SrcB, op.IpaOp == IpaOp.Multiply, op.Sat);
+        }
+
+        // nxnative: IPA's body, shared with SM8x IPA (InstEmitSm8x), which has no multiply and no indexed form
+        private static void EmitIpa(EmitterContext context, int ipaDest, int ipaAttr, bool ipaIndexed, int ipaRa, int ipaRb, bool multiply, bool ipaSat)
+        {
+            IpaFields op = new(ipaDest, ipaAttr, ipaIndexed, ipaRa, ipaRb, ipaSat);
 
             Operand res;
 
@@ -205,7 +229,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
             }
 
-            if (op.IpaOp == IpaOp.Multiply && !isFixedFunc)
+            if (multiply && !isFixedFunc)
             {
                 Operand srcB = GetSrcReg(context, op.SrcB);
 
@@ -293,6 +317,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 context.EndPrimitive();
             }
         }
+
+        // nxnative: the fields EmitAld / EmitAst / EmitIpa read, under the names the Maxwell code used
+        private readonly record struct AldFields(int Dest, int Imm11, int SrcA, int SrcB, bool Phys, bool P, bool O);
+        private readonly record struct AstFields(int SrcB, int Imm11, int SrcA, bool Phys, bool P);
+        private readonly record struct IpaFields(int Dest, int Imm10, bool Idx, int SrcA, int SrcB, bool Sat);
 
         private static bool HasPrimitiveVertex(int attr)
         {

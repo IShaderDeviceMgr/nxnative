@@ -19,7 +19,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 _map = new Dictionary<Register, Operand>();
 
-                _phiMasks = new long[(RegisterConsts.TotalCount + 63) / 64];
+                _phiMasks = new long[(RegisterConsts.AllCount + 63) / 64];   // nxnative: AllCount (SM8x uniform registers), was TotalCount
             }
 
             public bool TryAddOperand(Register reg, Operand operand)
@@ -70,8 +70,8 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             public LocalDefMap()
             {
-                _map = new Operand[RegisterConsts.TotalCount];
-                _uses = new int[RegisterConsts.TotalCount];
+                _map = new Operand[RegisterConsts.AllCount];   // nxnative: AllCount (SM8x uniform registers), was TotalCount
+                _uses = new int[RegisterConsts.AllCount];
             }
 
             public Operand Get(int key)
@@ -350,9 +350,17 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 return RegisterConsts.GprsCount + reg.Index;
             }
-            else /* if (reg.Type == RegisterType.Flag) */
+            else if (reg.Type == RegisterType.Flag)
             {
                 return GprsAndPredsCount + reg.Index;
+            }
+            else if (reg.Type == RegisterType.Uniform)   // nxnative: SM8x uniform registers and predicates follow the flags
+            {
+                return RegisterConsts.TotalCount + reg.Index;
+            }
+            else /* if (reg.Type == RegisterType.UniformPredicate) */
+            {
+                return RegisterConsts.TotalCount + RegisterConsts.UniformCount + reg.Index;
             }
         }
 
@@ -366,9 +374,17 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 return new Register(key - RegisterConsts.GprsCount, RegisterType.Predicate);
             }
-            else /* if (key < RegisterConsts.TotalCount) */
+            else if (key < RegisterConsts.TotalCount)
             {
                 return new Register(key - GprsAndPredsCount, RegisterType.Flag);
+            }
+            else if (key < RegisterConsts.TotalCount + RegisterConsts.UniformCount)   // nxnative: SM8x uniform registers and predicates
+            {
+                return new Register(key - RegisterConsts.TotalCount, RegisterType.Uniform);
+            }
+            else
+            {
+                return new Register(key - RegisterConsts.TotalCount - RegisterConsts.UniformCount, RegisterType.UniformPredicate);
             }
         }
     }

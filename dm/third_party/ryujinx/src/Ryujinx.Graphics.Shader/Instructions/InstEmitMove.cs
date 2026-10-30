@@ -71,9 +71,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstS2r op = context.GetOp<InstS2r>();
 
+            context.Copy(GetDest(op.Dest), GetSReg(context, op.SReg));
+        }
+
+        // nxnative: the special register read of S2R, shared with SM8x S2R / CS2R (InstEmitSm8x), whose register numbers are the same
+        private static Operand GetSReg(EmitterContext context, SReg sReg)
+        {
             Operand src;
 
-            switch (op.SReg)
+            switch (sReg)
             {
                 case SReg.LaneId:
                     src = EmitLoadSubgroupLaneId(context);
@@ -167,7 +173,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     break;
             }
 
-            context.Copy(GetDest(op.Dest), src);
+            return src;
         }
 
         private static Operand EmitLoadSubgroupLaneId(EmitterContext context)

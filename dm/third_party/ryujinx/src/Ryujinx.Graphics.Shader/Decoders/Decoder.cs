@@ -7,7 +7,7 @@ using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
 
 namespace Ryujinx.Graphics.Shader.Decoders
 {
-    static class Decoder
+    static partial class Decoder   // nxnative: partial, the SM8x decoder is Decoders/Sm8x/Sm8xDecoder.cs
     {
         private class Context
         {
@@ -371,6 +371,12 @@ namespace Ryujinx.Graphics.Shader.Decoders
                 indexed = opIpa.Idx;
             }
 
+            SetUserAttributeUses(definitions, context, offset, count, isStore, indexed, perPatch);
+        }
+
+        // nxnative: the attribute bookkeeping of ALD / AST / IPA, shared with the SM8x decoder (Sm8xDecoder), which reads the same fields from other bits
+        private static void SetUserAttributeUses(ShaderDefinitions definitions, Context context, int offset, int count, bool isStore, bool indexed, bool perPatch)
+        {
             if (indexed)
             {
                 if (isStore)
@@ -500,6 +506,11 @@ namespace Ryujinx.Graphics.Shader.Decoders
 
         public static bool IsUnconditionalBranch(ref InstOp op)
         {
+            if (op.IsSm8x)   // nxnative: SM8x encodes its predicates elsewhere
+            {
+                return Sm8x.Sm8xTable.IsUnconditionalBranch(op);
+            }
+
             return IsUnconditional(ref op) && op.Props.HasFlag(InstProps.Bra);
         }
 
