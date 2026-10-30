@@ -61,6 +61,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_hid.c` hooks the six public entry points as "no Joy-Con is used as a mouse": initialize, finalize, start and stop do nothing, `GetJcmsHandle` builds the handle, `GetJcmsStates` writes nothing and returns 0. A Switch 1 game never imports them.
 - **Found on:** Donkey Kong Bananza (Switch 2, SDK 20.5.19; no game note yet). The next blocker is graphics (NVN 2 functions the host does not implement yet).
 
+### `nn::streamplay` (Switch 2 GameShare) connects to `stpl:u`
+
+- **Symptom:** `[RED] sf: the game connects to service stpl:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15`, call site `sdk+0x6b6440`, the backtrace `CreateUserServiceByHipc` (`sdk+0x6ac10c`) under `nn::streamplay::GetRequiredMemorySize` (called from `main+0x5471bc`).
+- **Cause:** GameShare streams the game to other consoles and takes their players' input back. Every public `nn::streamplay` function goes through one SDK session to `stpl:u`, which the host does not serve; once the real `Initialize` is skipped, the SDK's local-only getters (`GetGuestPadStates` ...) abort as well (uninitialised state, invalid `GuestPadId`).
+- **Fix:** `hle_streamplay.c` answers "no streaming, no guests, never connects": `GetRequiredMemorySize` is one page, `Initialize` succeeds, `GetConnectionState` writes zeroes (idle, no error), `GetConnectionStateChangedEvent` is a bound event that never signals, `OpenSessionWithMatchmakeSupport` returns Result 0x3d1f (the matchmaking applet cancelled, which the game's wrapper ignores), `StartStreaming` / `CloseSession` / `Finalize` do nothing, and every guest getter reports no pad, handle or state. The `GuestVibrationTarget` constructor only initialises its own object and runs natively. A Switch 1 game never imports them.
+- **Found on:** Donkey Kong Bananza (Switch 2, SDK 20.5.19; no game note yet); Pokemon Pokopia imports it too. The next blocker is the unresolved `nn::vi::SetLayerNextHdrContentGamutMetadata` (a null call at `main+0x2036f4`).
+
 ### `nn::audio::IsDeviceOutputVolumeAutoTuneModeEnabled` connects to `aud:u`
 
 - **Symptom:** `[RED] sf: the game connects to service aud:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15`, the backtrace `CreateUserClientSessionByHipc` under `detail::GetAudioDeviceService` under `nn::audio::IsDeviceOutputVolumeAutoTuneModeEnabled`, right after the `audren:` and `audio #0 Start` lines.
