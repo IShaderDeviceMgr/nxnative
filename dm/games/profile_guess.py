@@ -77,6 +77,36 @@ def aarch64(path):   # main.npdm's flags (META +0xc) bit 0, Is64BitInstruction; 
     return d[:4] != b'META' or bool(d[0xc] & 1)
 
 
+# Where the ACID's body (its magic 'ACID') sits after its signature area, from the ACID offset at META +0x78: the Switch's is two 0x100-byte blocks (signature, NCA header key),
+# the Switch 2's 0x100 bytes more (Pokémon Pokopia: ACID at 0x80, 'ACID' at 0x380). The extended ACID is what tells a Switch 2 program from a Switch one.
+ACID_BODY = {0x200: 'Switch', 0x300: 'Switch 2'}
+SWITCH_SVC_MAX = 0x7F   # the Switch's last SVC (CallSecureMonitor); a Switch 2 program's kernel capabilities also allow 0x80
+
+
+def npdm_info(path):
+    """main.npdm's console facts: {'console': 'Switch' / 'Switch 2' / None (an ACID at neither place), 'acid': the ACID offset, 'flags': META +0xc,
+    'svcs': the SVC numbers ACI0's kernel capabilities allow}; None without the file"""
+    p = Path(path)
+    if not p.exists(): return None
+    d = p.read_bytes(); out = {'console': None, 'acid': None, 'flags': None, 'svcs': set()}
+    if d[:4] != b'META' or len(d) < 0x80: return out
+    out['flags'] = d[0xc]
+    aci, acid = struct.unpack_from('<I', d, 0x70)[0], struct.unpack_from('<I', d, 0x78)[0]
+    out['acid'] = acid
+    out['console'] = next((c for off, c in ACID_BODY.items() if d[acid + off:acid + off + 4] == b'ACID'), None)
+    if d[aci:aci + 4] == b'ACI0' and aci + 0x38 <= len(d):
+        ko, ks = struct.unpack_from('<II', d, aci + 0x30)   # kernel capabilities: offset and size from ACI0
+        for o in range(aci + ko, min(aci + ko + ks, len(d)) - 3, 4):
+            w = struct.unpack_from('<I', d, o)[0]
+            if w & 0x1F == 0x0F:   # four trailing ones: EnableSystemCalls, a 24-bit mask (bits 5-28) of the SVCs index (bits 29-31) × 24 onwards
+                out['svcs'] |= {(w >> 29) * 24 + b for b in range(24) if w >> (5 + b) & 1}
+    return out
+
+
+def switch2(exefs):   # main.npdm says Switch 2 (the extended ACID)
+    return (npdm_info(Path(exefs) / 'main.npdm') or {}).get('console') == 'Switch 2'
+
+
 def facts_of(exefs, romfs):
     """What the profile rules (and the survey report) need from a game's code modules and RomFS"""
     exefs = Path(exefs)
@@ -90,7 +120,7 @@ def facts_of(exefs, romfs):
         m = F['mods'][p.name] = {'bid': bid, 'sizes': szs, 'bss': bss, 'far': end > 0x7000000,   # far: the patch area goes before the base (patch_nso.py FAR), the bss counts as used memory (hle_svc.c big_bss_bytes)
                                  'imports': {s for s, defined, _ in syms if not defined}, 'exports': {s for s, defined, bind in syms if defined and bind in (1, 2)},
                                  'comps': {c.decode().rsplit('-', 1)[0] for c in re.findall(rb'NintendoSDK_(?!nnSdk)\w+-[0-9_]+', img)}}
-        F['sdkver'] |= {v.decode() for v in re.findall(rb'(?i)NintendoSDK_nnSdk-([0-9_]+)', img)}   # SDK 12 spells it NintendoSdk_, SDK 16 NintendoSDK_
+        F['sdkver'] |= {v.decode() for v in re.findall(rb'(?i)NintendoSDK_nnSdk-(?:[A-Za-z]+_)?([0-9_]+)', img)}   # SDK 12 spells it NintendoSdk_, SDK 16 NintendoSDK_; Switch 2's SDK 20 adds a variant (nnSdk-Generic_20_5_25)
         F['comps'] |= {c.decode() for c in re.findall(rb'SDK MW\+Nintendo\+([\w]+-[0-9_]+)', img)}
         for pat, name in MARKERS:
             if pat in img: F['markers'].setdefault(name, []).append(p.name)
@@ -99,8 +129,10 @@ def facts_of(exefs, romfs):
             F['glslc'], F['glsl_src'], F['gl_names'] = img.count(GLSLC_MAGIC), glsl_sources(img), img.count(b'glShaderSource')
             F['gl_src'] = len(re.findall(GL_SRC, img))
             F['main_markers'] = {name for pat, name in MARKERS if pat in img}
+            F['nvn_names'] = {s.decode() for s in re.findall(rb'(?<=\0)nvn[A-Z]\w*(?=\0)', img)}   # the NVN functions main asks nvnBootstrapLoader for, by name
         m['kind'] = {'main': 'the game', 'sdk': 'nnSdk', 'rtld': 'rtld'}.get(p.name) or kind(m)
     F['sysres'], F['program'] = npdm(exefs / 'main.npdm')
+    F['npdm'] = npdm_info(exefs / 'main.npdm')
     major = {v.split('_')[0] for v in F['sdkver']}
     F['sdk'] = min((int(v) for v in major if v.isdigit()), default=0)
 

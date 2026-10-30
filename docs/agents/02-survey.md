@@ -2,12 +2,12 @@
 
 Do this before touching the host. Every item answers "what will break, and how much work is it".
 
-**The first pass is automatic.** Run `scripts/build_ipa_from_nsp.py` on the title's NSP folder. When no game profile (`dm/games/*/game.tsv`) has its title ID, the script does no build. It extracts only the code modules plus a RomFS manifest (`nx_extract --manifest`: path, size and first 32 bytes of every file, with no game files written). It then writes `<NSP folder>/<title ID>_survey/survey.md`, which covers:
+**The first pass is automatic.** Run `scripts/build_ipa_from_nsp.py` on the title's NSP folder (or its [dump folder](01-extract.md#a-dump-folder-of-extracted-files)). When no game profile (`dm/games/*/game.tsv`) has its title ID, the script does no build. It extracts only the code modules plus a RomFS manifest (`nx_extract --manifest`: path, size and first 32 bytes of every file, with no game files written). It then writes `<NSP folder>/<title ID>_survey/survey.md`, which covers:
 
 - game name and display version (from the NACP). Newer SDKs compress the NACP's title area: a u16 size, then raw deflate that inflates to 32 language entries of 0x300 bytes (Mario 1.2.1 does this). LibHac 0.19 does not decode it; `nx_extract` and the script do;
 - base / update / DLC NSPs;
 - every module with its build ID and segment sizes;
-- program ID;
+- program ID, and the console: Switch, or Switch 2 when `main.npdm`'s ACID body sits at ACID +0x300 instead of +0x200 (the extended ACID). A Switch 2 game gets a `## Switch 2` section: the program flags, the SVCs allowed past 0x7f (0x80), the PAC / LSE / LDAPR counts (`insn_census.py`'s `native, no rewrite` line: Apple silicon runs them as they are), and the `nvn*` names `main` asks `nvnBootstrapLoader` for against `dm/gfx/nvn/names.txt` (the new ones in `nvn_new_names.txt`). The script stops after it: no NVN2 host or SM8x translator exists yet;
 - SDK version and components, the Unity version;
 - engine / API markers (NVN, Vulkan, EGL, IL2CPP, sead / agl, Wwise, CRIWARE, …);
 - RomFS folders, header magics and extensions;

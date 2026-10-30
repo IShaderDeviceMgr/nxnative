@@ -2,6 +2,8 @@
 """Count the instruction sites a d2r-mobile style rewriter must handle in an NSO text segment
 (see d2r-mobile dm/tools/patch_nso.py header): svc #n, mrs/msr tpidr_el0, mrs tpidrro_el0,
 counter-timer reads (cntpct/cntvct/cntfrq), and any use of x18/w18 (Apple's kernel clobbers x18).
+Also counts, on a line of their own, the instructions newer than the Switch's ARMv8.0 that a Switch 2 program uses and Apple silicon runs as they are (no rewrite): pointer authentication
+(PAC: pacibsp / retab ...; the PAC keys are off on Apple silicon's user processes as on Horizon, measured on an M1 Pro), LSE atomics and LDAPR (RCPC).
 Linear sweep over text, leaving out the data blocks patch_nso.py leaves alone (nso_code.py); literal pools / jump tables inside text can add a few false positives.
 Usage: insn_census.py <module.nso> [--sites <tsv out>]"""
 import collections, os, sys
@@ -11,6 +13,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nso, nso_code
 
 X18 = re.compile(r'\b[xw]18\b')   # not '#0x18' immediates
+PAC = re.compile(r'(pac|aut|xpac)\w*|(bl?r|eret|ret|ldr)a[ab]z?')   # pointer authentication (ARMv8.3)
+LSE = re.compile(r'(casp?|ld(add|clr|eor|set|smax|smin|umax|umin)|st(add|clr|eor|set|smax|smin|umax|umin)|swp)(a|al|l)?[bh]?')   # ARMv8.1 atomics
+RCPC = re.compile(r'ldapu?r[bh]?|ldapurs[bhw]')   # ARMv8.3 / 8.4 load-acquire RCpc
+
+
+def native(mn):   # the group of an instruction newer than ARMv8.0 that runs natively, or None
+    if PAC.fullmatch(mn): return mn if mn in ('pacibsp', 'retab', 'autibsp', 'paciasp', 'retaa', 'autiasp') else 'other PAC'
+    if LSE.fullmatch(mn): return 'LSE atomics'
+    if RCPC.fullmatch(mn): return 'LDAPR'
+    return None
 
 def image_of(path):   # (text segment offset, text size, the image of all three segments)
     m = nso.cli_read(path)
@@ -21,7 +33,7 @@ def main():
     base, tsz, img = image_of(path); text = bytes(img[base:base + tsz])
     md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
     data = nso_code.data_blocks(img, base + tsz, md)
-    c = collections.Counter(); svcs = collections.Counter(); sites = []
+    c = collections.Counter(); svcs = collections.Counter(); nat = collections.Counter(); sites = []
     total = 0; undecoded = 0
     skip = set()
     for s, e in data: skip.update(range(s - base, e - base, 4))
@@ -30,6 +42,7 @@ def main():
         r = next(md.disasm_lite(text[off:off + 4], base + off), None)
         if r is None: undecoded += 1; continue
         total += 1; addr, _, mn, ops = r; kind = None
+        if (n := native(mn)): nat[n] += 1
         if mn == 'svc': kind = 'svc'; svcs[ops] += 1
         elif mn in ('mrs', 'msr'):
             for reg in ('tpidrro_el0', 'tpidr_el0', 'cntpct_el0', 'cntvct_el0', 'cntfrq_el0', 'cntpctss_el0', 'cntvctss_el0'):
@@ -41,6 +54,7 @@ def main():
     print('%s: %d instructions decoded (%d undecodable words)' % (path, total, undecoded))
     if data: print('  data blocks left out: %s' % ', '.join('%#x..%#x' % b for b in data))
     for k, v in c.most_common(): print('  %-22s %d' % (k, v))
+    if nat: print('  native, no rewrite:', ', '.join('%s %d' % kv for kv in nat.most_common()))
     if svcs: print('  svc numbers:', ', '.join('%s x%d' % (k, v) for k, v in sorted(svcs.items(), key=lambda kv: int(kv[0].lstrip('#'), 0))))
     if sites_out:
         with open(sites_out, 'w') as f:

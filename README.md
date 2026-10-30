@@ -36,6 +36,8 @@ python3 -m pip install lz4 capstone fonttools nsz zbic "backports.zstd; python_v
   Super Mario Bros. Wonder [010015100B514800][v327680].nsp
 ```
 
+A dump folder (a game a dumper wrote as plain files: `<name>/base/exefs`, `updates/<version>/exefs` and `romfs`) needs no keys, but is only surveyed for now, as is any Switch 2 game ([details](docs/agents/01-extract.md#a-dump-folder-of-extracted-files)).
+
 **3. Build**, with your game folder and your `prod.keys`:
 
 ```

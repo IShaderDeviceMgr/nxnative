@@ -30,6 +30,22 @@ ht -t nca --exefsdir=$W/data/v0/ExeFS --romfsdir=$W/data/v0/RomFS $W/build/nsp/<
 
 **A damaged NSP** (an incomplete copy, a broken download) shows as a hash error while the RomFS is read. `nx_extract` lists every file whose data fails the NCA's hash check and exits with code 3; `--allow-damaged` (the NSP script's `ALLOW_DAMAGED` / `--allow-damaged`) writes them as read and only lists them. To check a whole NCA, its file name is the first 16 bytes of its SHA-256: Super Mario Galaxy's base program NCA hashed differently, with 12 MB runs of zeros near its end (147 MB of damaged RomFS: the two WebM prologue movies), while its update and the small NCAs matched their names.
 
+## A dump folder of extracted files
+
+Some dumpers write a game as plain, decrypted files instead of NSPs. `scripts/build_ipa_from_nsp.py <dump folder> --survey-only` takes one game's folder, with no keys:
+
+```
+<name>[ [<title ID>]]/
+  base/exefs/{main, main.npdm, rtld, sdk, subsdk*}    base/romfs/ when the dump has one
+  updates/<version number>/{exefs, romfs}            e.g. updates/327680 = v327680
+```
+
+- The title ID is `main.npdm`'s program ID, checked against the folder name's `[title ID]` when it has one; nothing is derived from a title ID scheme (a Switch 2 title's starts with `04`, not `01`).
+- The survey links the newest version's `exefs` as `ExeFS` (an update's is complete) and writes `romfs_manifest.tsv` from its `romfs`, else the base game's. An update's `romfs` is the whole patched RomFS, not a patch (a BKTR patch can only be read through the base game): on Donkey Kong Bananza the 41 of 75,238 base files its update lacks are the `.Product.100.` files it replaces with `.Product.200.` ones. The survey counts such files, and prints a `[RED]` line only when the update lacks most of them.
+- There is no control data: the name comes from the folder, and the display version is unknown.
+- A `dlc/` folder, an update folder that is not a version number, and any other unknown entry get a `[RED]` line and are left out. `.DS_Store`, `._*`, the `.listing` an FTP dumper writes into every folder, and the `<id>-work`, `<id>_survey` and `<id>_build` folders are known.
+- Building from a dump is not implemented: without `--survey-only` the script stops after the survey with an error, as it does for every Switch 2 game ([02-survey.md](02-survey.md)).
+
 ## Workspace layout used so far
 
 The work folder `$W` sits in the game's NSP folder, beside the NSP script's `<title>_build/`, never in the home folder:
