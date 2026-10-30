@@ -481,6 +481,12 @@ HLE_FORCE("_ZN2nn5audio41GetActiveAudioDeviceChannelCountForOutputEv", "output c
 static _Atomic float g_dev_vol = 1.0f;
 HLE_FORCE("_ZN2nn5audio26SetAudioDeviceOutputVolumeEPKNS0_15AudioDeviceNameEf", "device volume; kept for the getter, not applied by the host", void, h_ad_SetVol, const char *name, float v) { (void)name; atomic_store(&g_dev_vol, v); }
 HLE_FORCE("_ZN2nn5audio26GetAudioDeviceOutputVolumeEPKNS0_15AudioDeviceNameE", "device volume: what the game last set (1.0 at start)", float, h_ad_GetVol, const char *name) { (void)name; return atomic_load(&g_dev_vol); }
+// Device output volume auto-tune (SDK 20.5.19, new with the Switch 2 SDK; Donkey Kong Bananza): both go to aud:u through GetAudioDeviceService, which the host does not serve,
+// so the SDK aborted (Result 0xe15, sdk+0x1d09b4 under CreateUserClientSessionByHipc) at Bananza's main+0x57dc7c, in the audio start-up after the renderer opened. The setter is main+0x577dc4.
+// The host does not tune the output volume (the system's own volume applies, as for h_ad_SetVol): the flag is kept for the getter and starts off, the system default.
+static _Atomic int g_ad_autotune;
+HLE_FORCE("_ZN2nn5audio40SetDeviceOutputVolumeAutoTuneModeEnabledEb", "device output volume auto-tune: kept for the getter, not applied by the host", void, h_ad_SetTune, int on) { atomic_store(&g_ad_autotune, on & 1); }
+HLE_FORCE("_ZN2nn5audio39IsDeviceOutputVolumeAutoTuneModeEnabledEv", "device output volume auto-tune: what the game last set (off at start)", int, h_ad_GetTune, void) { return atomic_load(&g_ad_autotune); }
 // Returns a Result (Metroid Dread's sdk+0x534a0): 0, or 0x499 when the notification is already acquired (a flag the SDK keeps for the process), before which it binds nothing
 static atomic_int g_ad_notify;
 HLE_FORCE("_ZN2nn5audio39AcquireAudioDeviceNotificationForOutputEPNS_2os11SystemEventE", "output device change notification: bound, never signaled", Result, h_ad_Notify, void *ev) {

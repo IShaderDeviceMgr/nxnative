@@ -61,6 +61,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_hid.c` hooks the six public entry points as "no Joy-Con is used as a mouse": initialize, finalize, start and stop do nothing, `GetJcmsHandle` builds the handle, `GetJcmsStates` writes nothing and returns 0. A Switch 1 game never imports them.
 - **Found on:** Donkey Kong Bananza (Switch 2, SDK 20.5.19; no game note yet). The next blocker is graphics (NVN 2 functions the host does not implement yet).
 
+### `nn::audio::IsDeviceOutputVolumeAutoTuneModeEnabled` connects to `aud:u`
+
+- **Symptom:** `[RED] sf: the game connects to service aud:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15`, the backtrace `CreateUserClientSessionByHipc` under `detail::GetAudioDeviceService` under `nn::audio::IsDeviceOutputVolumeAutoTuneModeEnabled`, right after the `audren:` and `audio #0 Start` lines.
+- **Cause:** `IsDeviceOutputVolumeAutoTuneModeEnabled()` and `SetDeviceOutputVolumeAutoTuneModeEnabled(bool)` (SDK 20.5.19) ask the audio device service directly, which the host does not serve; the other `nn::audio` device calls (`GetAudioDeviceOutputVolume`, the output device names) are hooked already.
+- **Fix:** `hle_audren.c` hooks both: the flag is kept for the getter (off at start) and not applied, the host does not tune the output volume. The other new SDK 20 output-stream calls (`OpenOutputStream`, `GetDefaultVirtualOutputDevice` ...) have not been reached yet.
+- **Found on:** Donkey Kong Bananza (Switch 2, SDK 20.5.19; no game note yet): the audio start-up (`main+0x57dc7c`), reached only after its memory budget was raised, because the game's heap definition (`System/HeapSize/*.HeapDef.byml`) needs far more than the provisional 3.2 GB `app_pool`, whose `AudioSystemHeap` allocation otherwise returns null; the next blocker is `nn::streamplay::GetRequiredMemorySize` (service `stpl:u`).
+
 ## SDK names that changed between versions
 
 ### Older SDK names for the same calls
