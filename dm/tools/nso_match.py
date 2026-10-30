@@ -13,6 +13,7 @@ import hashlib
 import json
 import struct
 
+from nso_asm import cf_mnemonic
 from nso_code import fde_ranges
 
 
@@ -86,7 +87,7 @@ class Image:
                         and (u >> 5) & 31 == rd):
                     normalized[j] &= ~0x3ffc00
                     break
-                if _relative(u) or ins[j].mnemonic in ('br', 'blr', 'ret'): break
+                if _relative(u) or cf_mnemonic(ins[j].mnemonic) in ('br', 'blr', 'ret'): break
                 _, writes = ins[j].regs_access()
                 if any(ins[j].reg_name(r) in (f'x{rd}', f'w{rd}', {29: 'fp', 30: 'lr'}.get(rd, '')) for r in writes): break
         digest = hashlib.sha256(struct.pack('<' + 'I' * len(normalized), *normalized)).hexdigest()

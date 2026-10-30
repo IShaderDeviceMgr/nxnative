@@ -26,3 +26,9 @@ def BEQ(frm, to):
 def BRK(imm): return 0xD4200000 | ((imm & 0xFFFF) << 5)
 def BLR(n): return 0xD63F0000 | (n << 5)
 NOP = 0xD503201F
+
+# The authenticated branches of ARMv8.3 pointer authentication, which Switch 2 code uses (Donkey Kong Bananza's main: 53,476 retab), behave as the plain
+# forms here: PAC keys are off on Horizon and on macOS, so retab acts as ret, blraa as blr. The rewriter's control-flow checks map a mnemonic through this.
+PAC_BRANCH = {'retaa': 'ret', 'retab': 'ret', 'braa': 'br', 'brab': 'br', 'braaz': 'br', 'brabz': 'br',
+              'blraa': 'blr', 'blrab': 'blr', 'blraaz': 'blr', 'blrabz': 'blr', 'eretaa': 'eret', 'eretab': 'eret'}
+def cf_mnemonic(m): return PAC_BRANCH.get(m, m)

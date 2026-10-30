@@ -340,7 +340,7 @@ def site_obs(off, oid, word):
     """Observation gate: original entry instruction → enter the host gate (arg = observation number) → restore x29/x30 → execute the original instruction → jump back to off+4.
         The first half of the gate block is word-for-word isomorphic with site_gate; the host only reads registers and does not modify them (the x0–x8 written back by dm_gate are the original values)."""
     ins = dis(word, off)
-    assert ins.mnemonic not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') and not ins.mnemonic.startswith('b.') \
+    assert cf_mnemonic(ins.mnemonic) not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') and not ins.mnemonic.startswith('b.') \
         and not (ins.mnemonic.startswith('ldr') and '[' not in ins.op_str) and not has18(ins), f'observation gate original instruction cannot be relocated {off:#x} {ins.mnemonic} {ins.op_str}'
     start = here()
     emit(STP_PRE(29, 30, 31, -16))
@@ -404,7 +404,7 @@ def site_window(seg):
             dd = dis(w, pc); assert dd.operands[-1].imm == newt and dd.mnemonic == m
         elif m == 'adrp': w = window_adrp(x, S, copy0 + 4 * k)
         else:
-            assert m not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret') and not (m == 'ldr' and '[' not in x.op_str), hex(x.address)
+            assert cf_mnemonic(m) not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret') and not (m == 'ldr' and '[' not in x.op_str), hex(x.address)
         words.append(w)
     for w in words: emit(w)
     for t in [hi] + ex_targets:   # fall-through first
@@ -422,7 +422,7 @@ def retry_block(insl, k, wseg):
     for p in range(k - 1, max(-1, k - 8), -1):
         q = insl[p]
         if q.mnemonic in EXCL_LD: return insl[p:k + 1], tail
-        if q.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or q.mnemonic.startswith('b.') or q.mnemonic in EXCL_ST: return None
+        if cf_mnemonic(q.mnemonic) in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or q.mnemonic.startswith('b.') or q.mnemonic in EXCL_ST: return None
     return None
 
 def site_retry_window(parts):
@@ -456,7 +456,7 @@ def site_retry_window(parts):
                 dd = dis(w, pc); assert dd.operands[-1].imm == newt and dd.mnemonic == m
             elif m == 'adrp': w = window_adrp(x, S, pc)
             else:
-                assert m not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret') and not (m == 'ldr' and '[' not in x.op_str), hex(x.address)
+                assert cf_mnemonic(m) not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret') and not (m == 'ldr' and '[' not in x.op_str), hex(x.address)
             emit(w)
         emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), ft)); emit(NOP)
     for t in ex_targets:
@@ -558,7 +558,7 @@ def check_before_copy(insl, ctx, ld, idx):
     for q in range(kl - 3, -1, -1):
         p = insl[q]
         if p.address + 4 != insl[q + 1].address: return None
-        if p.mnemonic in ('bl', 'blr') and any(int(r[1:]) <= 18 for r in idx | {src}): return None
+        if cf_mnemonic(p.mnemonic) in ('bl', 'blr') and any(int(r[1:]) <= 18 for r in idx | {src}): return None
         mm = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
         if mm and mm.group(1) in idx and mm.group(2) == src: break
         if writes(p) & (idx | {src}): return None
@@ -651,7 +651,7 @@ def forward_table_base(insl, k, rb, n):
     if branch.mnemonic != 'b.hi' or add.mnemonic != 'add' or add.op_str != f'x18, {m.group(1)}, {rb}' or jump.mnemonic != 'br' or jump.op_str != 'x18': return None
     if any(b.address != a.address + 4 for a, b in zip(insl[k - 2:k + 3], insl[k - 1:k + 3])): return None
     protected = {p.address for p in insl[k - 1:k + 3]}
-    if any(p.mnemonic in ('bl', 'blr') for p in insl) and int(rb[1:]) <= 18: return None
+    if any(cf_mnemonic(p.mnemonic) in ('bl', 'blr') for p in insl) and int(rb[1:]) <= 18: return None
     base_names = {rb, 'w' + rb[1:]} | {alias for alias, reg in {'lr': 'x30', 'fp': 'x29'}.items() if reg == rb}
     writers = [(i, p) for i, p in enumerate(insl) if p.mnemonic not in ('cmp', 'cmn', 'tst') and
                any(p.reg_name(r) in base_names for r in p.regs_access()[1])]
@@ -676,7 +676,7 @@ def table_base(insl, k, rb, far=False):
     means the code before it in address order is not the path that set rb)"""
     lo = None
     for p in reversed(insl[0 if far else max(0, k - 256):k]):
-        if far and p.mnemonic in ('bl', 'blr') and num(rb) <= 18: return None   # pyright: ignore[reportOptionalOperand]  # a table base register, always xN
+        if far and cf_mnemonic(p.mnemonic) in ('bl', 'blr') and num(rb) <= 18: return None   # pyright: ignore[reportOptionalOperand]  # a table base register, always xN
         _, w = p.regs_access()
         if not any(p.reg_name(r) == rb for r in w): continue
         if lo is None and p.mnemonic == 'add' and re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str): lo = int(p.op_str.split('#')[1], 0); continue
@@ -689,7 +689,7 @@ def copied_base(insl, k, rb):
     canon = {'lr': 'x30', 'fp': 'x29'}   # capstone's reg_name calls x30 lr and x29 fp
     lo, r = None, canon.get(rb, rb)
     for p in reversed(insl[:k]):
-        if p.mnemonic in ('bl', 'blr') and num(r) <= 18: return None   # pyright: ignore[reportOptionalOperand]  # a table base register, always xN
+        if cf_mnemonic(p.mnemonic) in ('bl', 'blr') and num(r) <= 18: return None   # pyright: ignore[reportOptionalOperand]  # a table base register, always xN
         _, w = p.regs_access()
         # A write to wN zeroes the upper half of xN too; it is a clobber, never a copy of the 64-bit base.
         if not any(canon.get(p.reg_name(x), p.reg_name(x)).replace('w', 'x', 1) == r for x in w): continue
@@ -726,11 +726,11 @@ def jump_masked_not(insl, j):
     if head <= branch.operands[0].imm <= end: return None
     def writes(p, reg):
         if p.mnemonic in ('cmp', 'cmn', 'tst'): return False
-        if p.mnemonic in ('bl', 'blr') and int(reg[1:]) <= 18: return True
+        if cf_mnemonic(p.mnemonic) in ('bl', 'blr') and int(reg[1:]) <= 18: return True
         return any(p.reg_name(r).replace('w', 'x', 1) == reg for r in p.regs_access()[1])
     if any(writes(p, idx) for p in ctx[km + 1:kl]) or any(writes(p, ent) for p in ctx[kl + 1:ka]) or \
        any(writes(p, base) for p in ctx[kl + 1:ka + 1]) or any(writes(p, 'x18') for p in ctx[ka + 1:-1]): return None
-    if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.') for p in ctx[km + 1:-1]): return None
+    if any(cf_mnemonic(p.mnemonic) in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.') for p in ctx[km + 1:-1]): return None
     for p in insl:
         if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
             if head < p.operands[-1].imm <= end: return None
@@ -793,7 +793,7 @@ def jump_masked_pred(insl, j):
     as jump_offsets' far_base finds it, and every target must be an instruction of the function. Tried only after every other form has failed, so sites that rewrote before come out
     the same. Returns all targets, or None if not recognized"""
     def is_branch(p): return p.mnemonic in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.')
-    def is_cf(p): return is_branch(p) or p.mnemonic in ('br', 'blr', 'bl', 'ret')
+    def is_cf(p): return is_branch(p) or cf_mnemonic(p.mnemonic) in ('br', 'blr', 'bl', 'ret')
     def writes(p):   # capstone lists a compare's first operand as written; it only sets the flags
         return set() if p.mnemonic in ('cmp', 'cmn', 'tst') else {num({'lr': 'x30', 'fp': 'x29'}.get(p.reg_name(r), p.reg_name(r))) for r in p.regs_access()[1]}
     kh = next((q for q in range(j - 1, max(0, j - 32) - 1, -1) if is_cf(insl[q])), None)   # the block's b.hi: the nearest control flow before the br
@@ -813,7 +813,7 @@ def jump_masked_pred(insl, j):
     ka = next((q for q in range(kl + 1, j) if 18 in writes(insl[q])), None)   # the first write of x18 after the load must be the add
     if ka is None or insl[ka].mnemonic != 'add' or insl[ka].op_str != f'x18, x18, {rb}': return None
     if any(num(rb) in writes(p) for p in insl[kl + 1:ka]) or any(18 in writes(p) for p in insl[ka + 1:j]): return None
-    if insl[k - 1].mnemonic not in ('b', 'br', 'ret'): return None   # no fall-through into the block
+    if cf_mnemonic(insl[k - 1].mnemonic) not in ('b', 'br', 'ret'): return None   # no fall-through into the block
     brs = [q for q, p in enumerate(insl) if (is_branch(p) or p.mnemonic == 'bl') and p.operands[-1].type == ARM64_OP_IMM]
     into = {insl[q].operands[-1].imm for q in brs}
     if any(p.address in into for p in insl[k + 1:j + 1]): return None   # a branch into the block past its and
@@ -1045,6 +1045,7 @@ for a in sorted(kinds):
     ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
     if k == 'x18':
         m = ins.mnemonic
+        if cf_mnemonic(m) != m: raise RuntimeError(f'{a:x} {m} {ins.op_str}')   # a PAC branch on x18: none exists in Switch 2 code
         if m == 'br' and a in tailcalls: st = site_br_call(ins); stat('br_call')
         elif m == 'br': st = site_br_tab(ins, tabjumps[a]) if a in tabjumps else site_br(ins, *jumps[a]); stat('br')
         elif m in ('cbz', 'cbnz', 'tbz', 'tbnz'): st = site_cond(ins); stat('cond')
@@ -1072,10 +1073,10 @@ def scratch_dead(off):
     for _ in range(16):
         if not 0 <= a < TEXT_END: return False
         ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
-        if ins.mnemonic in ('bl', 'ret'): return True
+        if cf_mnemonic(ins.mnemonic) in ('bl', 'ret'): return True
         if ins.mnemonic == 'b':
             a = ins.operands[0].imm; continue
-        if ins.mnemonic in ('br', 'blr', 'cbz', 'cbnz', 'tbz', 'tbnz') or ins.mnemonic.startswith('b.'): return False
+        if cf_mnemonic(ins.mnemonic) in ('br', 'blr', 'cbz', 'cbnz', 'tbz', 'tbnz') or ins.mnemonic.startswith('b.'): return False
         rd, wr = regset(ins)
         if any(9 <= (num(r) or -1) <= 17 and num(r) not in written for r in rd): return False
         written |= {num(r) for r in wr}
