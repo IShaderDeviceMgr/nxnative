@@ -704,7 +704,7 @@ Dead code unless such a build is run; a candidate for removal, or for a build ro
 
 ## Translator rules keyed by a shader's code
 
-- [Program.cs:219](../../dm/gfx/tools/dmsh_xlate/Program.cs#L219): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below)
+- [Program.cs:221](../../dm/gfx/tools/dmsh_xlate/Program.cs#L221): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below)
 
 ## Profile switches
 

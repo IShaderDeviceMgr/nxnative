@@ -13,7 +13,7 @@ import dmsh_geometry, dmsh_atomic, dmsh_abi as abi   # abi: the driver segment l
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_mesh, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import shader_split, dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_mesh, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -380,21 +380,43 @@ def vertex_ab(key, code, ctl):
             struct.pack_into('<Q', a, o, 0xe24 << 52 | ((len(a) - (o + 8)) & 0xffffff) << 20 | ins & 0xfffff)
     return code[:0x30] + struct.pack('<20I', *sph) + bytes(a) + b, code[b_sph + b_len:]
 
+def sm8x_job_parts(key, name, rec, ci):
+    """The code area, c1 and the job fields of an SM8x shader (Switch 2: Volta+ instruction set), read from its control section by shader_split's own rules (sm8x_ctl, sm8x_facts, sm8x_check),
+    which pick this branch: a Maxwell control section is at least 0x760 bytes and these at most 0x188, so they never meet. The record is code area + control section. The code area goes to the
+    translator as it is (graphics: the 0x80-byte SPH version 4 and the instructions; compute: the instructions from +0), c1 = code[control +0x40:+0x44], the stage control +0x54 >> 16.
+    Maxwell's 0x30 header strip, the VertexA / VertexB merge (control +0x748 / +0x700) and the 0x100 compute header do not exist here.
+    Not read from the SM8x section: the transform feedback layout (tf_layout reads Maxwell's +0x6dc / +0xdc / +0x4dc; where SM8x keeps it is not decoded: no capture entry point, open) and a
+    geometry shader's output layout (dmsh_geometry reads Maxwell's SPH): geometry, hull and domain shaders of SM8x are reported as not built (SM8X_SKIP)"""
+    code, ctl = rec[0x38:ci], rec[ci:]
+    st = shader_split.SM8X_STAGES[struct.unpack_from('<I', ctl, 0x54)[0] >> 16] if struct.unpack_from('<I', ctl, 0x54)[0] >> 16 < len(shader_split.SM8X_STAGES) else None
+    if not st or shader_split.sm8x_check(st, ctl, code): sys.exit(f'[RED] {key}: SM8x control section that does not match its code area ({shader_split.sm8x_check(st, ctl, code) if st else "stage " + hex(struct.unpack_from("<I", ctl, 0x54)[0])})')
+    if st != name[:2]: sys.exit(f'[RED] {key}: SM8x control section says stage {st}, the package file {name}')
+    c1s, c1e = struct.unpack_from('<2I', ctl, 0x40)
+    extra = {'arch': 'sm8x'}
+    if st == 'cs': local, shared = shader_split.sm8x_facts(ctl); extra.update({'local': local, 'shared': shared})   # the answer table's row (FACTS) overrides these with the same values (shared rounded up to 16)
+    if st in ('gs', 'hs', 'ds'): extra['skip'] = f'SM8x {st} shader: output layout of its SPH version 4 is not decoded (dmsh_geometry reads Maxwell\'s), not built'
+    return code, code[c1s:c1e], extra
+
 def job_for(key, name, rec, w):
-    ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
-    c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
-    c1 = rec[0x38 + c1o:0x38 + c1t]
-    ab = vertex_ab(key, code, rec[ci:]) if stage == 'vs' else None
-    if ab: code, c1 = ab
-    if stage != 'cs': code = code[0x30:]   # strip the 0x30 header (the 0x50 SPH after it is read by the translator itself)
-    elif code[:4] == bytes.fromhex('79563412'):
-        # Compute in this game has a header (magic 0x12345679; D2R's package records have none): 0x30 header + zero padding, instructions start at code area +0x100 (measured on all 71; the BRA-to-self and the control words are 32-byte aligned to this start).
-        # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
-        if any(code[0x30:0x100]): sys.exit(f'[RED] {key}: compute code area +0x30..+0x100 is not all zero, so the instructions do not start at +0x100')
-        code = code[0x100:]
+    ci = rec.find(bytes.fromhex('34127698')); stage = name[:2]
+    if shader_split.sm8x_ctl(rec[ci:]):
+        code, c1, extra = sm8x_job_parts(key, name, rec, ci)
+        ab = None
+    else:
+        extra = {}; code = rec[0x38:ci]
+        c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
+        c1 = rec[0x38 + c1o:0x38 + c1t]
+        ab = vertex_ab(key, code, rec[ci:]) if stage == 'vs' else None
+        if ab: code, c1 = ab
+        if stage != 'cs': code = code[0x30:]   # strip the 0x30 header (the 0x50 SPH after it is read by the translator itself)
+        elif code[:4] == bytes.fromhex('79563412'):
+            # Compute in this game has a header (magic 0x12345679; D2R's package records have none): 0x30 header + zero padding, instructions start at code area +0x100 (measured on all 71; the BRA-to-self and the control words are 32-byte aligned to this start).
+            # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
+            if any(code[0x30:0x100]): sys.exit(f'[RED] {key}: compute code area +0x30..+0x100 is not all zero, so the instructions do not start at +0x100')
+            code = code[0x100:]
     cp = os.path.join(w, key + '.bin'); open(cp, 'wb').write(code)
-    tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
-    j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **({'tf': tf} if tf else {}),
+    tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') and not extra else None   # SM8x: see sm8x_job_parts
+    j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **({'tf': tf} if tf else {}), **extra,
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables
     if key not in FACTS: j['no_facts'] = True; return j, c1   # not in the answer table: queries use defaults (listed separately in the summary)
     j.update(FACTS[key])
@@ -1133,7 +1155,7 @@ for key in keys:
 misses = [key for key in keys if key not in cache_hits]
 chunks = [misses[i::NJ] for i in range(NJ)]
 def xl(ch):
-    jp = os.path.join(w, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
+    jp = os.path.join(w, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch if not jobs[k].get('skip')], open(jp, 'w'))   # a job with 'skip' is not translated (sm8x_job_parts)
     return subprocess.run([XLATE, jp, w], capture_output=True, text=True)
 with cf.ThreadPoolExecutor(NJ) as ex: xr = list(ex.map(xl, [c for c in chunks if c]))
 xerr = {}
@@ -1147,6 +1169,7 @@ def fin(key):
         src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
         if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
         return key, 'ok', '', fetch_finish(key, src, alpha_finish(key, src, refl))
+    if jobs[key].get('skip'): return key, 'not built (SM8x)', jobs[key]['skip'], None
     if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
     result = (key,) + finish(key, w, jobs[key], c1s[key])
     if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
