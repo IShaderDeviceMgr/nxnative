@@ -631,7 +631,7 @@ def reflect(key, stage, msl, res):
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
         elif re.fullmatch(r'[a-z]+_c(\d+)', nm):
             n = int(re.fullmatch(r'[a-z]+_c(\d+)', nm).group(1))
-            e.update(kind=abi.KIND_CBUF, reg=n - 3) if 3 <= n <= 16 else e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)
+            e.update(kind=abi.KIND_CBUF, reg=n - 3) if 3 <= n <= 16 else e.update(kind=abi.KIND_CBUF, reg=abi.PUSH_UBO_REG) if n == abi.PUSH_BANK else e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)   # NVN 2 push constants (dmsh_abi.h DMSH_PUSH_BANK)
         elif re.fullmatch(r'[a-z]+_s(\d+)', nm):
             e.update(kind=abi.KIND_SBUF, index=int(re.fullmatch(r'[a-z]+_s(\d+)', nm).group(1)))
         elif decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)

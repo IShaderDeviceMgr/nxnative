@@ -432,6 +432,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `Sm8xTex` samples into temporaries and writes `PackHalf2x16` of components 0, 1 to Rd and 2, 3 to Rc when bit 79 is set (`InstEmitSm8xTexture.cs`). TLD (0xb66) and TLD4 (0xb63) with the bit throw a `NotSupportedException` naming the opcode, so such a shader fails in the build and does not render wrong. The chain version covers the SM8x translator sources now (`dmsh_chain.py` `FILES`); they were missing.
 - **Found on:** Donkey Kong Bananza (`040074A01BF12000`, no game note yet): pixel shader `774693c4b145ebc5` (the dialog text).
 
+### NVN 2 push constants (constant bank 24)
+
+- **Symptom:** the 3D scene is drawn into its G-buffer (a dark cave in the HDR target) but never reaches the screen: the frame is the UI target alone. `[RED] program has no vertex shader (or it is not mapped)` and `draw skipped: no render pipeline (vertex - fragment ...)` for the fullscreen post-process draws, and `dmsh_build.py` reports `IndexOutOfRangeException` in `ResourceManager.GetConstantBufferBinding` for 5 shaders.
+- **Cause:** SM8x shaders read constant bank 24, `c[24][0..0xc]`, which no uniform buffer binding fills. The translator's slot map had 18 entries (Maxwell's c[0] to c[17]). The data is NVN 2's push constants: `nvnCommandBufferPushGraphicsConstants` / `PushComputeConstants` (cb, w1, x2, w3 = size, x4 = data; w1 and x2 are 0 in every call seen, meaning open). Bananza pushes 16 bytes before post-process draws (`1 / width, 1 / height, width, height` as floats) and 32 bytes (two pixel rectangles) before a dispatch. The call site is `main+0x8aa790`; the host had stubbed the call after logging two registers that were both 0.
+- **Fix:** the translator's slot map covers 32 banks (`ResourceManager.cs`). `dmsh_build.py` `reflect` gives bank `DMSH_PUSH_BANK` the `cbuf` kind at uniform slot `DMSH_PUSH_UBO_REG` (`dmsh_abi.h`). The host copies the pushed bytes at record time (`push_constants`, `hle_nvn.c`) into a 4 MB ring registered as a memory pool and records an ordinary `BindUniformBuffer` of that range at the slot for the five graphics stages (or compute), so the replay needs no new command. Open: the meaning of w1 / x2 (a slot or stage index, a byte offset), the `Deferred` variants, and a game that binds its own uniform buffer at index 15.
+- **Found on:** Donkey Kong Bananza (`040074A01BF12000`, no game note yet): vertex shaders `04a209f2e78754bd`, `8e51162d7b83d387`, `44a7c58cc83a175c`, pixel shaders `d6c0f83282009305`, `3b45dca2b9307e8c`; passes 202032, 202034 and 202035 of frame 2600 (the tonemap and composite).
+
 ### SPIRV-Cross parse failures
 
 - **Symptom:** SPIRV-Cross can't parse the SPIR-V (`nullptr` exception).

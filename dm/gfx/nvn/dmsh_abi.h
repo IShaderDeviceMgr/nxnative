@@ -33,6 +33,15 @@
 #define DMSH_C0_POINT_SIZE 0x610         // graphics stages: the largest point size, to which GLSLC clamps a shader-written gl_PointSize (Super Mario Odyssey's point sprites)
 #define DMSH_C0_BASE_INSTANCE 0x644      // graphics stages: the draw's base instance, which GLSLC adds to Maxwell's instance ID (Pokémon Legends: Z-A's occlusion boxes)
 
+// NVN 2 (Switch 2) push constants: SM8x shaders read them from constant bank DMSH_PUSH_BANK (the translator names that bank <stage>_c24, reflection kind "cbuf"). The game sets them with
+// nvnCommandBufferPushGraphicsConstants / PushComputeConstants (cb, 0, 0, size, data): Donkey Kong Bananza pushes 16 bytes (1 / width, 1 / height, width, height as floats) before a
+// post-process draw and 32 bytes (two rectangles, in pixels) before a compute dispatch. The host copies the data at record time into a ring it registers as a memory pool and binds it
+// at uniform slot DMSH_PUSH_UBO_REG of every stage the call covers (hle_nvn.c push_constants). The slot is the one past Maxwell's last uniform bank (c[17] = slot 14), which no NVN 1 or
+// Bananza call uses (it never binds an index of 14 or more)
+#define DMSH_PUSH_BANK 24                // the constant bank of NVN 2's push constants
+#define DMSH_PUSH_UBO_REG 15             // the uniform slot they are bound at: reflection reg of that bank (the bank is c[3 + reg] for the games' own uniform buffers)
+#define DMSH_PUSH_RING 0x400000          // bytes of the host's push constant ring (each push takes 16-byte aligned space; a record is replayed long before the ring wraps)
+
 // Binding kinds: the "kind" of each binding in a shader's <key>_b.json, as the build writes it and the host reads it (nvn_refl.m turns each into an NVN_RB_* code, nvn_refl.h)
 #define DMSH_KIND_CBUF "cbuf"            // uniform buffer slot reg (c[3 + reg])
 #define DMSH_KIND_C1 "c1"                // the shader's own constant segment c[1] (its bytes are the json's c1)

@@ -66,7 +66,8 @@ namespace Ryujinx.Graphics.Shader.Translation
             _stage = stage;
             _stagePrefix = GetShaderStagePrefix(stage);
 
-            _cbSlotToBindingMap = new SetBindingPair[18];
+            // nxnative: 32 banks (a bank number has 5 bits on SM8x): NVN 2's push constants are read from bank 24 (dmsh_abi.h DMSH_PUSH_BANK); 18 covered Maxwell's c[0]..c[17] and a shader reading a higher bank threw IndexOutOfRangeException
+            _cbSlotToBindingMap = new SetBindingPair[32];
             _sbSlotToBindingMap = new SetBindingPair[16];
             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
             _sbSlotToBindingMap.AsSpan().Fill(new(-1, -1));

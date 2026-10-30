@@ -60,5 +60,21 @@ class StorageBuffers(unittest.TestCase):
         self.assertIsNone(bindings('hs', [0x410], [1])[0]['reg'])
 
 
+class PushConstants(unittest.TestCase):
+    def members(self, names):
+        return 'struct spvDescriptorSetBuffer0\n{\n' + ''.join(f'    constant _16* {n} [[id({i})]];\n' for i, n in enumerate(names)) + '};\n'
+
+    def test_bank_24_is_the_push_slot(self):
+        # NVN 2 push constants: constant bank DMSH_PUSH_BANK is a uniform buffer at slot DMSH_PUSH_UBO_REG (dmsh_abi.h)
+        got = REFLECT('synthetic', 'vs', self.members(['vp_c24', 'vp_c3', 'vp_c16']), {'sbufs': []})
+        self.assertEqual([(b['kind'], b['reg']) for b in got], [('cbuf', dmsh_abi.PUSH_UBO_REG), ('cbuf', 0), ('cbuf', 13)])
+        self.assertEqual(dmsh_abi.PUSH_BANK, 24)
+        self.assertGreater(dmsh_abi.PUSH_UBO_REG, 13)   # above the banks c[3] to c[16] that NVN 1 games bind
+
+    def test_driver_banks_stay_driver_banks(self):
+        got = REFLECT('synthetic', 'ps', self.members(['fp_c0', 'fp_c1', 'fp_c2']), {'sbufs': []})
+        self.assertEqual([(b['kind'], b['bank']) for b in got], [('drvcb', 0), ('c1', 1), ('drvcb', 2)])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -2354,14 +2354,31 @@ NVN_NOPROTO(nvnCommandBufferSetGeometryProcessingMode, void, NVNcommandBuffer *c
 NVN_NOPROTO(nvnCommandBufferSetComputeOverlapMode, void, NVNcommandBuffer *c, uint32_t mode) { (void)c; (void)mode; }
 // SetStencilCullCriteria(cb, func, mask): a stencil-based early cull optimisation hint (values seen on Bananza: func 3, mask 0xff); results do not depend on it
 NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int func, uint32_t mask) { (void)c; (void)func; (void)mask; }
-// PushGraphicsConstants / PushComputeConstants: signature unconfirmed (x1, x2 are the two arguments after the command buffer). Donkey Kong Bananza (SDK 20.5.19) passes x1 = 0, x2 = 0 in every call seen
-// (graphics: first scene after the dialog; compute: 10 calls, 3 minutes of play), which pushes no data. Real push constants would need the shader side, so a non-zero argument is reported and ignored (open).
-NVN_NOPROTO(nvnCommandBufferPushGraphicsConstants, void, NVNcommandBuffer *c, uint64_t a, uint64_t b) {
-    (void)c; if (a || b) ONCE_LOG("[RED] PushGraphicsConstants %#llx %#llx: non-zero push constants are not implemented (open)", (unsigned long long)a, (unsigned long long)b);
+// NVN 2 push constants: nvnCommandBufferPushGraphicsConstants / PushComputeConstants (cb, w1, x2, w3 = size in bytes, x4 = data), read from Donkey Kong Bananza's call sites (main+0x8aa790: mov w1, wzr;
+// mov x2, xzr; mov w3, #0x10; x4 = the stack block). w1 and x2 are 0 in all 90 calls seen; their meaning (a slot or stage index? a byte offset?) is OPEN, so a call with either non-zero is reported and
+// takes the data at offset 0. Graphics: 16 bytes (floats 1 / width, 1 / height, width, height of the pass: 3a088889 3a72b9d6 44f00000 44870000 = 1/1920, 1/1080, 1920, 1080) before post-process draws;
+// compute: 32 bytes (four ints: 0 0 1279 719, then 0 0 1919 1079) before a dispatch. The SM8x shaders that use them read constant bank 24, c[24][0..0xc] (the build's DMSH_PUSH_BANK).
+// The data is on the caller's stack, so it is copied at record time into a ring that the replay layer knows as a memory pool (mtl_pool_add), and bound by an ordinary BindUniformBuffer record at
+// uniform slot DMSH_PUSH_UBO_REG of each stage the call covers (all five graphics stages, or compute): the replay then treats it as one more uniform buffer, in the command stream's order.
+static uint8_t *g_push_ring; static uint32_t g_push_pos; static pthread_mutex_t g_push_mu = PTHREAD_MUTEX_INITIALIZER;
+static void push_constants(NVNcommandBuffer *c, int first_stage, int nstages, uint64_t a, uint64_t b, uint64_t size, const void *data) {
+    if (a || b) ONCE_LOG("[RED] PushConstants with w1=%#llx x2=%#llx: only 0 and 0 are known (open); the data is taken as offset 0", (unsigned long long)a, (unsigned long long)b);
+    if (!data || !size || size > 0x1000) { if (size) ONCE_LOG("[RED] PushConstants size %llu: only 1 to 4096 bytes are handled (open)", (unsigned long long)size); return; }
+    uint32_t len = ((uint32_t)size + 15u) & ~15u;
+    pthread_mutex_lock(&g_push_mu);
+    if (!g_push_ring) {
+        g_push_ring = mmap(NULL, DMSH_PUSH_RING, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+        if (g_push_ring == MAP_FAILED) { g_push_ring = NULL; pthread_mutex_unlock(&g_push_mu); LOG("[RED] push constant ring: mmap failed"); return; }
+        mtl_pool_add(g_push_ring, DMSH_PUSH_RING);
+    }
+    if (g_push_pos + len > DMSH_PUSH_RING) g_push_pos = 0;   // wraps long after the earliest record was replayed (4 MB = 100,000 pushes of 32 bytes; the game makes about 60 a frame)
+    uint8_t *dst = g_push_ring + g_push_pos; g_push_pos += len;
+    memcpy(dst, data, size); memset(dst + size, 0, len - size);
+    pthread_mutex_unlock(&g_push_mu);
+    for (int i = 0; i < nstages; i++) h_nvnCommandBufferBindUniformBuffer(c, (NVNshaderStage)(first_stage + i), DMSH_PUSH_UBO_REG, (NVNbufferAddress)(uintptr_t)dst, len);
 }
-NVN_NOPROTO(nvnCommandBufferPushComputeConstants, void, NVNcommandBuffer *c, uint64_t a, uint64_t b) {
-    (void)c; if (a || b) ONCE_LOG("[RED] PushComputeConstants %#llx %#llx: non-zero push constants are not implemented (open)", (unsigned long long)a, (unsigned long long)b);
-}
+NVN_NOPROTO(nvnCommandBufferPushGraphicsConstants, void, NVNcommandBuffer *c, uint64_t a, uint64_t b, uint64_t size, const void *data) { push_constants(c, 0, 5, a, b, size, data); }
+NVN_NOPROTO(nvnCommandBufferPushComputeConstants, void, NVNcommandBuffer *c, uint64_t a, uint64_t b, uint64_t size, const void *data) { push_constants(c, 5, 1, a, b, size, data); }
 
 // nvnProgramSetShadersExt (NVN 55): each stage is 0x18 bytes = NVNshaderData{data, control} + one 8-byte extension field (filled from SMBW main 0x1074ff0).
 // The host identifies stages by the control section and does not use the extension field: convert to plain NVNshaderData and hand it to SetShaders.
