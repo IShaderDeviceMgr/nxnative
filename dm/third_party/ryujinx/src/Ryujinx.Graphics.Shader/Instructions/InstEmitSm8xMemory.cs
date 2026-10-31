@@ -248,8 +248,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Sm8xHelper.SetGpr(context, inst.Rd, res);
         }
 
-        // RED: ATOMG without a result (NAK OpAtom with no destination): [Ra (a 64-bit pair when 90 is set) + UR(64; a pair when 72 is set) + signed offset 40..63]
-        // op= Rb (32); op 87..89 and type 73..75 numbered as ATOMG's. The same 32-bit integer subset as Sm8xAtomg; the rest is rejected
+        // RED: ATOMG without a result (NAK OpAtom with no destination): op= Rb (32); op 87..89 and type 73..75 numbered as ATOMG's. The same 32-bit integer subset as Sm8xAtomg; the rest is rejected.
+        // Bit 91 selects the addressing form (NAK sets it on SM73+ and encodes the address through it):
+        //   set:   [Ra (a 64-bit pair when 90 is set) + UR(64; a pair when 72 is set) + signed offset 40..63]
+        //   clear: [Ra (a 64-bit pair when 72 is set) + signed offset 40..63] and no uniform register; bits 64..71 are then not a UR index (they read 0 = UR0 on Bananza's
+        //          NVIDIA-compiled shaders, whose uninitialised UR0 was added to the address: GlobalToStorage found no storage buffer behind an Undefined addend, and the write was lost)
         public static void Sm8xRed(EmitterContext context)
         {
             Sm8xInst inst = Sm8xHelper.Inst(context);
@@ -261,7 +264,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 Sm8xHelper.Unsupported(context, $"reduction {atomOp} type {type}");
             }
 
-            (Operand lo, Operand hi) = Sm8xGlobalAddress(context, inst, 64, 90);
+            bool ugpr = inst.Bit(91);
+            (Operand lo, Operand hi) = Sm8xGlobalAddress(context, inst, ugpr ? 64 : -1, ugpr ? 90 : 72);
             EmitAtomicOp(context, StorageKind.GlobalMemory, atomOp, type == 0 ? AtomSize.U32 : AtomSize.S32, lo, hi, Sm8xHelper.Gpr(inst.Rb));
         }
 

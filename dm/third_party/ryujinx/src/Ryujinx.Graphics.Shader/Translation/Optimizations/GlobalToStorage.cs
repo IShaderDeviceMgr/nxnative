@@ -1010,7 +1010,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             int constOffset = 0;
 
-            if ((src1.Type == OperandType.LocalVariable && src2.Type == OperandType.Constant) ||
+            // nxnative: any number of constant additions are peeled off the address, not just one. NVIDIA's SM8x compiler (and the SM8x emitters, which add a load's
+            // word index to the address) stack them: ((c0 + 36) + 92) + 4 stayed three Adds, found no storage buffer and read 0
+            while ((src1.Type == OperandType.LocalVariable && src2.Type == OperandType.Constant) ||
                 (src2.Type == OperandType.LocalVariable && src1.Type == OperandType.Constant))
             {
                 Operand baseAddr;
@@ -1027,23 +1029,23 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     offset = src1;
                 }
 
-                SearchResult result = GetBaseAddressCbWithOffset(baseAddr, offset, 0);
+                SearchResult result = GetBaseAddressCbWithOffset(baseAddr, offset, constOffset);
                 if (result.Found)
                 {
                     return result;
                 }
 
-                constOffset = offset.Value;
+                constOffset += offset.Value;
                 operation = baseAddr.AsgOp as Operation;
 
                 if (operation == null || operation.Inst != Instruction.Add)
                 {
                     return FindBaseAddressCbFromMemory(gtsContext, operation, constOffset, needsOffset);
                 }
-            }
 
-            src1 = operation.GetSource(0);
-            src2 = operation.GetSource(1);
+                src1 = operation.GetSource(0);
+                src2 = operation.GetSource(1);
+            }
 
             // If we have two possible results, we give preference to the ones from
             // the driver reserved constant buffer, as those are the ones that

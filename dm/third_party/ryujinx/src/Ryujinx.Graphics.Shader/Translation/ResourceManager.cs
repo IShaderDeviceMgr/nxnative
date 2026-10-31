@@ -68,7 +68,9 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             // nxnative: 32 banks (a bank number has 5 bits on SM8x): NVN 2's push constants are read from bank 24 (dmsh_abi.h DMSH_PUSH_BANK); 18 covered Maxwell's c[0]..c[17] and a shader reading a higher bank threw IndexOutOfRangeException
             _cbSlotToBindingMap = new SetBindingPair[32];
-            _sbSlotToBindingMap = new SetBindingPair[16];
+            // nxnative: 32 storage buffers (the uint written mask holds 32): SM8x compute shaders choose among 32 table entries (c0 + 0x10 + 0x10 r), and one that touched more than 16
+            // distinct ones lost every store and atomic past the sixteenth (Maxwell's table has 16 entries, so Switch 1 shaders are not reached)
+            _sbSlotToBindingMap = new SetBindingPair[32];
             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
             _sbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
 
