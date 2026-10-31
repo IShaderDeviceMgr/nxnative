@@ -24,7 +24,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     {
                         bool isWorthPropagating = propVar.Uses.Count == 1 || IsWorthPropagating(assignment.Source);
 
-                        if (propVar.Defs.Count == 1 && isWorthPropagating)
+                        if (propVar.Defs.Count == 1 && isWorthPropagating && !IsCallArgument(propVar, assignment.Source))
                         {
                             PropagateExpression(propVar, assignment.Source);
                         }
@@ -47,6 +47,34 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             }
 
             RemoveEmptyBlocks(mainBlock);
+        }
+
+        // nxnative: SPIR-V passes the arguments of a call by pointer to a local variable (StructuredProgram copies each into a temporary first, and
+        // GenerateCall casts every argument to an AstOperand), so a temporary that is a call argument takes no expression. Without this the optimizer replaced
+        // the temporary with the expression computing it as soon as that expression was itself propagated into the temporary (an LDC.S8 helper call whose
+        // address is computed by an IADD: InvalidCastException in GenerateCall)
+        private static bool IsCallArgument(AstOperand propVar, IAstNode source)
+        {
+            if (source is AstOperand)
+            {
+                return false;
+            }
+
+            foreach (IAstNode useNode in propVar.Uses)
+            {
+                if (useNode is AstOperation useOperation && (useOperation.Inst & Instruction.Mask) == Instruction.Call)
+                {
+                    for (int srcIndex = 1; srcIndex < useOperation.SourcesCount; srcIndex++)
+                    {
+                        if (useOperation.GetSource(srcIndex) == propVar)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
         }
 
         private static bool HasSideEffects(Instruction inst)

@@ -82,10 +82,11 @@ namespace Ryujinx.Graphics.Shader.Decoders
 
                 // Indirect jumps: their targets come from the code decoded so far, which they may extend; repeat until no new target appears
                 bool grew = false;
+                Dictionary<ulong, List<ulong>> predecessors = BuildSm8xPredecessors(ops, indirectTargets);
 
                 foreach ((ulong address, SortedSet<ulong> targets) in indirectTargets)
                 {
-                    foreach (ulong target in FindSm8xIndirectTargets(context, ops, address))
+                    foreach (ulong target in FindSm8xIndirectTargets(context, ops, predecessors, address))
                     {
                         // A table entry that is not an instruction address means the pattern or the table is not what it was taken for: never jump into an instruction
                         if (target % Sm8xInstSize != 0 || gpuAccessor.GetCode(startAddress + target, Sm8xInstSize).Length < 2)
@@ -200,7 +201,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
         //    LDC R, c[1][Ri + base] (the table of bound + 1 offsets in c1, read through ConstantBuffer1Read)
         //  - RET.REL.NODEC R: the return points, the instructions after each CALL.REL.NOINC whose offset the program loads with MOV imm before the call
         //    (SM8x: unverified that a return never goes elsewhere; Pokopia's compiler sets the return offset only this way)
-        private static IEnumerable<ulong> FindSm8xIndirectTargets(Context context, Dictionary<ulong, InstOp> ops, ulong address)
+        private static IEnumerable<ulong> FindSm8xIndirectTargets(Context context, Dictionary<ulong, InstOp> ops, Dictionary<ulong, List<ulong>> predecessors, ulong address)
         {
             Sm8xInst inst = new(ops[address]);
             long baseAddress = (long)address + Sm8xInstSize + inst.BranchOffset;
@@ -236,10 +237,10 @@ namespace Ryujinx.Graphics.Shader.Decoders
             {
                 // BRXU UR: the uniform form, ULDC URt, c[1][URi + base] (0xabb); USHF.L.U32 URi, URk, 2, URZ; USEL URk, URj, bound, UP (Pokopia clamps the index
                 // with UISETP + USEL instead of IMNMX)
-                if (!TryFindSm8xWriter(ops, address, inst.URa, true, out Sm8xInst uldc, out ulong uldcAddress) || uldc.Opcode != 0xabb || uldc.Bits(54, 5) != 1 || uldc.Bits(73, 3) != 4 ||
-                    !TryFindSm8xWriter(ops, uldcAddress, uldc.URa, true, out Sm8xInst ushf, out ulong ushfAddress) ||
+                if (!TryFindSm8xWriter(ops, predecessors, address, inst.URa, true, out Sm8xInst uldc, out ulong uldcAddress) || uldc.Opcode != 0xabb || uldc.Bits(54, 5) != 1 || uldc.Bits(73, 3) != 4 ||
+                    !TryFindSm8xWriter(ops, predecessors, uldcAddress, uldc.URa, true, out Sm8xInst ushf, out ulong ushfAddress) ||
                     ushf.Opcode != 0x899 || ushf.Imm32 != 2 || ushf.URc != RegisterConsts.UniformZeroIndex || ushf.Bit(76) || ushf.Bits(73, 2) != 3 ||
-                    !TryFindSm8xWriter(ops, ushfAddress, ushf.URa, true, out Sm8xInst usel, out _) || usel.Opcode != 0x887)
+                    !TryFindSm8xWriter(ops, predecessors, ushfAddress, ushf.URa, true, out Sm8xInst usel, out _) || usel.Opcode != 0x887)
                 {
                     yield break;
                 }
@@ -259,12 +260,12 @@ namespace Ryujinx.Graphics.Shader.Decoders
                 yield break;
             }
 
-            if (!TryFindSm8xWriter(ops, address, inst.Ra, false, out Sm8xInst ldc, out ulong ldcAddress) || ldc.Opcode != 0xb82 || ldc.Bits(54, 5) != 1 || ldc.Bits(73, 3) != 4 || ldc.Bits(78, 2) != 0)
+            if (!TryFindSm8xWriter(ops, predecessors, address, inst.Ra, false, out Sm8xInst ldc, out ulong ldcAddress) || ldc.Opcode != 0xb82 || ldc.Bits(54, 5) != 1 || ldc.Bits(73, 3) != 4 || ldc.Bits(78, 2) != 0)
             {
                 yield break;
             }
 
-            if (!TryFindSm8xWriter(ops, ldcAddress, ldc.Ra, false, out Sm8xInst shl, out ulong shlAddress))
+            if (!TryFindSm8xWriter(ops, predecessors, ldcAddress, ldc.Ra, false, out Sm8xInst shl, out ulong shlAddress))
             {
                 yield break;
             }
@@ -272,7 +273,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
             bool isShl = (shl.Opcode == 0x819 && shl.Imm32 == 2 && shl.Rc == RegisterConsts.RegisterZeroIndex && !shl.Bit(76) && shl.Bits(73, 2) == 3) ||
                          (shl.Opcode == 0x824 && shl.Imm32 == 4 && shl.Rc == RegisterConsts.RegisterZeroIndex);
 
-            if (!isShl || !TryFindSm8xWriter(ops, shlAddress, shl.Ra, false, out Sm8xInst imnmx, out _))
+            if (!isShl || !TryFindSm8xWriter(ops, predecessors, shlAddress, shl.Ra, false, out Sm8xInst imnmx, out _))
             {
                 yield break;
             }
@@ -290,40 +291,111 @@ namespace Ryujinx.Graphics.Shader.Decoders
             }
         }
 
-        // The last instruction before address, in straight-line code (up to 64 instructions back, not past a jump), whose destination (16..23, a UR at 16..21) is reg
-        private static bool TryFindSm8xWriter(Dictionary<ulong, InstOp> ops, ulong address, int reg, bool uniform, out Sm8xInst writer, out ulong at)
+        // The control flow predecessors of each decoded instruction: the instruction before it unless that one always jumps away, every branch (BRA, CALL.REL.NOINC)
+        // whose offset field lands on it, and every indirect jump (BRX, BRXU, RET) whose targets found so far include it. BSSY / BSYNC / BREAK jump nowhere (see Sm8xTable)
+        private static Dictionary<ulong, List<ulong>> BuildSm8xPredecessors(Dictionary<ulong, InstOp> ops, Dictionary<ulong, SortedSet<ulong>> indirectTargets)
         {
-            for (ulong a = address; a >= Sm8xInstSize && address - a < 64 * Sm8xInstSize;)
-            {
-                a -= Sm8xInstSize;
+            Dictionary<ulong, List<ulong>> predecessors = new();
 
-                if (!ops.TryGetValue(a, out InstOp op))
+            void Add(ulong to, ulong from)
+            {
+                if (!predecessors.TryGetValue(to, out List<ulong> list))
                 {
-                    break;
+                    predecessors.Add(to, list = []);
                 }
 
+                list.Add(from);
+            }
+
+            foreach ((ulong address, InstOp op) in ops)
+            {
                 Sm8xInst inst = new(op);
 
-                if (Sm8xTable.IsTerminator(inst, out _))
+                if (!Sm8xTable.IsTerminator(inst, out Sm8xKind kind))
                 {
-                    break;
+                    Add(address + Sm8xInstSize, address);
+                    continue;
                 }
 
-                bool writes = uniform
-                    ? inst.URd == reg && inst.Opcode is 0xabb or 0xab9 or 0x899 or 0x887 or 0x890 or 0x8a4 or 0x882 or 0xc82
-                    : inst.Rd == reg && inst.Opcode is 0xb82 or 0x819 or 0x824 or 0x817 or 0x802 or 0x202 or 0x210 or 0x810 or 0x224 or 0x211 or 0x811;
-
-                if (writes && !Sm8xTable.IsNever(inst))
+                if (kind == Sm8xKind.Branch)
                 {
-                    at = a;
-                    writer = inst;
-                    return true;
+                    Add((ulong)((long)address + Sm8xInstSize + inst.BranchOffset), address);
+                }
+
+                if (Sm8xTable.IsConditional(inst, kind))
+                {
+                    Add(address + Sm8xInstSize, address);
                 }
             }
 
+            foreach ((ulong address, SortedSet<ulong> targets) in indirectTargets)
+            {
+                foreach (ulong target in targets)
+                {
+                    Add(target, address);
+                }
+            }
+
+            return predecessors;
+        }
+
+        // The instruction that wrote reg (a UR when uniform) as it is read at address, found as a reaching definition over the control flow graph, backwards from address:
+        // the same instruction on every path (the clamp of a jump table sits before the branch that skips part of the shader, and the BRX behind it: Bananza's pixel shaders
+        // run 24..49 instructions from the table load across a conditional BRA). A path that reaches the program start without a write (the register is an input) or a second
+        // writer on another path fails, as does a search that visits more than 256 instructions; a predicated writer ends its path as a write, as for any straight-line code
+        private static bool TryFindSm8xWriter(Dictionary<ulong, InstOp> ops, Dictionary<ulong, List<ulong>> predecessors, ulong address, int reg, bool uniform, out Sm8xInst writer, out ulong at)
+        {
             writer = default;
             at = 0;
-            return false;
+
+            HashSet<ulong> visited = [address];
+            Stack<ulong> pending = new();
+            pending.Push(address);
+            bool found = false;
+
+            while (pending.TryPop(out ulong current))
+            {
+                if (!predecessors.TryGetValue(current, out List<ulong> list) || list.Count == 0)
+                {
+                    return false;
+                }
+
+                foreach (ulong p in list)
+                {
+                    if (!ops.TryGetValue(p, out InstOp op))
+                    {
+                        return false;
+                    }
+
+                    Sm8xInst inst = new(op);
+                    bool writes = uniform
+                        ? inst.URd == reg && inst.Opcode is 0xabb or 0xab9 or 0x899 or 0x887 or 0x890 or 0x8a4 or 0x882 or 0xc82
+                        : inst.Rd == reg && inst.Opcode is 0xb82 or 0x819 or 0x824 or 0x817 or 0x802 or 0x202 or 0x210 or 0x810 or 0x224 or 0x211 or 0x811;
+
+                    if (writes && !Sm8xTable.IsNever(inst))
+                    {
+                        if (found && p != at)
+                        {
+                            return false;
+                        }
+
+                        found = true;
+                        at = p;
+                        writer = inst;
+                    }
+                    else if (visited.Add(p))
+                    {
+                        if (visited.Count > 256)
+                        {
+                            return false;
+                        }
+
+                        pending.Push(p);
+                    }
+                }
+            }
+
+            return found;
         }
 
         private static void RecordSm8xUses(ShaderDefinitions definitions, Context context, Sm8xInst inst, Sm8xKind kind)
