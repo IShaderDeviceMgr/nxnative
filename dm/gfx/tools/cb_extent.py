@@ -25,7 +25,7 @@ def extents(source, bindings):
     """{reg: bytes} for the cbuf bindings whose every read is a proven index into _m0"""
     out, definitions = {}, None
     for b in bindings:
-        if b.get("kind") != abi.KIND_CBUF or "reg" not in b: continue
+        if b.get("kind") != abi.KIND_CBUF or b.get("reg") is None: continue
         name = b["msl_name"]
         uses = len(re.findall(r"\b" + re.escape(name) + r"\b", source))
         reads = re.findall(r"\(\*spvDescriptorSet0\." + re.escape(name) + r"\)\._m0\[([^\]]+)\]", source)
@@ -51,7 +51,7 @@ def unwritten(source, bindings):
     writable (device, not const device), so the host takes a binding as written unless the table lists it"""
     out = []
     for b in bindings:
-        if b.get("kind") != abi.KIND_SBUF or "reg" not in b: continue
+        if b.get("kind") != abi.KIND_SBUF or b.get("reg") is None: continue   # a binding with no decoded slot (reg null) has no table entry
         name = "spvDescriptorSet0." + b["msl_name"]; ok = True
         for m in re.finditer(r"\(\*" + re.escape(name) + r"\b", source):
             j = m.end()

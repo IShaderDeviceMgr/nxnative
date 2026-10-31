@@ -385,8 +385,9 @@ def sm8x_job_parts(key, name, rec, ci):
     which pick this branch: a Maxwell control section is at least 0x760 bytes and these at most 0x188, so they never meet. The record is code area + control section. The code area goes to the
     translator as it is (graphics: the 0x80-byte SPH version 4 and the instructions; compute: the instructions from +0), c1 = code[control +0x40:+0x44], the stage control +0x54 >> 16.
     Maxwell's 0x30 header strip, the VertexA / VertexB merge (control +0x748 / +0x700) and the 0x100 compute header do not exist here.
-    Not read from the SM8x section: the transform feedback layout (tf_layout reads Maxwell's +0x6dc / +0xdc / +0x4dc; where SM8x keeps it is not decoded: no capture entry point, open) and a
-    geometry shader's output layout (dmsh_geometry reads Maxwell's SPH): geometry, hull and domain shaders of SM8x are reported as not built (SM8X_SKIP)"""
+    Not read from the SM8x section: the transform feedback layout (tf_layout reads Maxwell's +0x6dc / +0xdc / +0x4dc; where SM8x keeps it is not decoded: no capture entry point, open).
+    Hull and domain shaders of SM8x are reported as not built (SM8X_SKIP); a geometry shader is built: the 0x80-byte SPH version 4 keeps the passthrough flag (w0 bit 24), invocations (w2 >> 24),
+    output topology (w3 >> 24 & 15) and maximum output vertices (w4 & 4095) where Maxwell's version 3 does (NAK's encoder sets the same SPHV3_T1 fields for both), so dmsh_geometry reads it unchanged"""
     code, ctl = rec[0x38:ci], rec[ci:]
     st = shader_split.SM8X_STAGES[struct.unpack_from('<I', ctl, 0x54)[0] >> 16] if struct.unpack_from('<I', ctl, 0x54)[0] >> 16 < len(shader_split.SM8X_STAGES) else None
     if not st or shader_split.sm8x_check(st, ctl, code): sys.exit(f'[RED] {key}: SM8x control section that does not match its code area ({shader_split.sm8x_check(st, ctl, code) if st else "stage " + hex(struct.unpack_from("<I", ctl, 0x54)[0])})')
@@ -394,7 +395,7 @@ def sm8x_job_parts(key, name, rec, ci):
     c1s, c1e = struct.unpack_from('<2I', ctl, 0x40)
     extra = {'arch': 'sm8x'}
     if st == 'cs': local, shared = shader_split.sm8x_facts(ctl); extra.update({'local': local, 'shared': shared})   # the answer table's row (FACTS) overrides these with the same values (shared rounded up to 16)
-    if st in ('gs', 'hs', 'ds'): extra['skip'] = f'SM8x {st} shader: output layout of its SPH version 4 is not decoded (dmsh_geometry reads Maxwell\'s), not built'
+    if st in ('hs', 'ds'): extra['skip'] = f'SM8x {st} shader: not built (no game with SM8x tessellation has been brought up)'
     return code, code[c1s:c1e], extra
 
 def job_for(key, name, rec, w):

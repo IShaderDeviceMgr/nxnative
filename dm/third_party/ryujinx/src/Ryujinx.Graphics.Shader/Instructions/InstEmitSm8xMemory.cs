@@ -121,6 +121,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Sm8xHelper.SetGpr(context, inst.Rd, Sm8xHelper.Gpr(inst.Ra));
         }
 
+        // LEPC: Rd = the address of this instruction (a constant: addresses are known at decode time). Geometry shaders start with LEPC R0; MOV R3, imm; IADD3 R0 = R0 + R3, the address of their epilogue.
+        public static void Sm8xLepc(EmitterContext context)
+        {
+            Sm8xInst inst = Sm8xHelper.Inst(context);
+
+            Sm8xHelper.SetGpr(context, inst.Rd, Const((int)context.CurrOp.Address));
+        }
+
         // OUT: emit / cut 78..79 (NAK OpOut); Rd receives the next handle (the shader passes it back in Ra)
         public static void Sm8xOut(EmitterContext context)
         {
@@ -332,6 +340,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return cond;
         }
 
+        // SM8x: unverified. A geometry shader registers its epilogue (OP_357_GSEPILOGUE_SETUP, address from LEPC) and the epilogue ends with OUT RZ (type 0) and OP_957_GSEPILOGUE; the paths of the
+        // line-strip shaders of Donkey Kong Bananza end in EXIT right after their OUT.EMITs and never reach that OUT, which is consistent with the hardware running the epilogue at EXIT to end the strip.
+        // A strip is therefore ended at every EXIT of a non-passthrough geometry shader (a passthrough one ends its primitive in PrepareForReturn).
+        private static void Sm8xEndGeometryPrimitive(EmitterContext context)
+        {
+            if (context.TranslatorContext.Definitions.Stage == ShaderStage.Geometry && !context.TranslatorContext.Definitions.GpPassthrough)
+            {
+                context.EndPrimitive();
+            }
+        }
+
         // EXIT: as Maxwell's, under the instruction predicate and the condition 87..90
         public static void Sm8xExit(EmitterContext context)
         {
@@ -347,6 +366,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (cond == null)
             {
+                Sm8xEndGeometryPrimitive(context);
+
                 if (context.PrepareForReturn())
                 {
                     context.Return();
@@ -357,6 +378,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand lblSkip = Label();
             context.BranchIfFalse(lblSkip, cond);
+            Sm8xEndGeometryPrimitive(context);
 
             if (context.PrepareForReturn())
             {

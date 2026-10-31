@@ -114,6 +114,15 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
             Set(0x321, InstEmit.Sm8xAld, Sm8xKind.Attribute);
             Set(0x322, InstEmit.Sm8xAst, Sm8xKind.Attribute);
             Set(0x923, InstEmit.Sm8xIsberd);
+            Set(0x34e, InstEmit.Sm8xLepc);   // SM8x: unverified (see Sm8xLepc)
+            // SM8x: unverified. No source names these two; they appear only in geometry shaders (all 7 of Donkey Kong Bananza's, which have the same shape):
+            //   LEPC R0; MOV R3, imm; IADD3 R0 = R0 + R3; IMAD ...; 0x357 ... OUT RZ; 0x957; EXIT
+            // LEPC + the immediate (0x8a0) is exactly the address of the final OUT / 0x957 / EXIT epilogue and R0 is never used as a jump target, so 0x357 is read as registering that
+            // epilogue address (implicit R0) and 0x957 as the epilogue marker: both are no-ops here. Open risk: if the hardware ran the registered epilogue at every EXIT,
+            // the early-EXIT paths would also get the final OUT. That cannot matter for passthrough shaders (vertices reach the rasteriser unchanged). The line-strip shaders
+            // end in EXIT right after their OUT.EMITs and never reach the epilogue OUT, so the translator has no implicit end of primitive at shader end for them; Sm8xExit adds one at every EXIT.
+            Set(0x357, InstEmit.Sm8xNop);
+            Set(0x957, InstEmit.Sm8xNop);
             Set(0x324, InstEmit.Sm8xOut);
             Set(0x924, InstEmit.Sm8xOut);
             Set(0xb24, InstEmit.Sm8xOut);
