@@ -167,7 +167,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // nxnative: IPA's body, shared with SM8x IPA (InstEmitSm8x), which has no multiply and no indexed form
-        private static void EmitIpa(EmitterContext context, int ipaDest, int ipaAttr, bool ipaIndexed, int ipaRa, int ipaRb, bool multiply, bool ipaSat)
+        private static void EmitIpa(EmitterContext context, int ipaDest, int ipaAttr, bool ipaIndexed, int ipaRa, int ipaRb, bool multiply, bool ipaSat, Operand indexedAddress = null)
         {
             IpaFields op = new(ipaDest, ipaAttr, ipaIndexed, ipaRa, ipaRb, ipaSat);
 
@@ -177,7 +177,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (op.Idx)
             {
-                Operand offset = context.ISubtract(GetSrcReg(context, op.SrcA), Const(AttributeConsts.UserAttributeBase));
+                Operand offset = context.ISubtract(indexedAddress ?? GetSrcReg(context, op.SrcA), Const(AttributeConsts.UserAttributeBase));
                 Operand vecIndex = context.ShiftRightU32(offset, Const(4));
                 Operand elemIndex = context.BitwiseAnd(context.ShiftRightU32(offset, Const(2)), Const(3));
 

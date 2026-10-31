@@ -111,6 +111,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             Sm8xInst inst = Sm8xHelper.Inst(context);
 
+            if (inst.Opcode == 0x526)
+            {
+                // IPA with the attribute address indexed by a uniform register: a[imm + UR(Ra)] (Ra 24..29, bit 91 = Ra is a UR). The Bananza cube-map convolution loops over six faces
+                // and reads the direction of face UR5 from UR4 = UR5 << 4 (a[0x80 + 16 * face]). Same as Maxwell's IPA.IDX with a register address
+                EmitIpa(context, inst.Rd, inst.Bits(64, 8) << 2, true, inst.Ra, inst.Rb, false, false, context.IAdd(Sm8xHelper.Ur(inst.Bits(24, 6)), Const(inst.Bits(64, 8) << 2)));
+                return;
+            }
+
             EmitIpa(context, inst.Rd, inst.Bits(64, 8) << 2, false, inst.Ra, inst.Rb, false, false);
         }
 
