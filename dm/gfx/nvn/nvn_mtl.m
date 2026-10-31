@@ -4400,6 +4400,7 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
+    { static int nb = -1; if (nb < 0) { const char *e = getenv("DM_GPU_CAPTURE_NO_LOD_BIAS"); nb = e && atoi(e); } if (nb) d.lodBias = 0; }   // diagnostic: gpudebug(1) refuses to replay a trace whose samplers have an LOD bias ("incompatible — sampler LOD bias"); with this switch a DM_GPU_CAPTURE trace replays from the command line (mip selection differs slightly)
     d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
