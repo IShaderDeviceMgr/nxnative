@@ -31,6 +31,13 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
                         if (propVar.Type == OperandType.LocalVariable && propVar.Uses.Count == 0)
                         {
+                            // nxnative: an atomic or a call writes memory (or calls out) whether or not its result is read (RED, ATOMG with Rd=RZ, a helper call): the
+                            // statement stays and only the assignment goes. Dropping the whole assignment lost every such write on both Maxwell and SM8x
+                            if (assignment.Source is AstOperation srcOp && HasSideEffects(srcOp.Inst))
+                            {
+                                visitor.Block.AddAfter(assignment, srcOp);
+                            }
+
                             visitor.Block.Remove(assignment);
 
                             context.CurrentFunction.Locals.Remove(propVar);
@@ -40,6 +47,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             }
 
             RemoveEmptyBlocks(mainBlock);
+        }
+
+        private static bool HasSideEffects(Instruction inst)
+        {
+            return inst.IsAtomic() || (inst & Instruction.Mask) is Instruction.Call or Instruction.ImageAtomic;
         }
 
         private static bool IsWorthPropagating(IAstNode source)

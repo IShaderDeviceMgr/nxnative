@@ -248,6 +248,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Sm8xHelper.SetGpr(context, inst.Rd, res);
         }
 
+        // RED: ATOMG without a result (NAK OpAtom with no destination): [Ra (a 64-bit pair when 90 is set) + UR(64; a pair when 72 is set) + signed offset 40..63]
+        // op= Rb (32); op 87..89 and type 73..75 numbered as ATOMG's. The same 32-bit integer subset as Sm8xAtomg; the rest is rejected
+        public static void Sm8xRed(EmitterContext context)
+        {
+            Sm8xInst inst = Sm8xHelper.Inst(context);
+            AtomOp atomOp = (AtomOp)inst.Bits(87, 3);
+            int type = inst.Bits(73, 3);
+
+            if (type > 1 || atomOp is not (AtomOp.Add or AtomOp.Min or AtomOp.Max or AtomOp.And or AtomOp.Or or AtomOp.Xor))
+            {
+                Sm8xHelper.Unsupported(context, $"reduction {atomOp} type {type}");
+            }
+
+            (Operand lo, Operand hi) = Sm8xGlobalAddress(context, inst, 64, 90);
+            EmitAtomicOp(context, StorageKind.GlobalMemory, atomOp, type == 0 ? AtomSize.U32 : AtomSize.S32, lo, hi, Sm8xHelper.Gpr(inst.Rb));
+        }
+
         private static (Operand Lo, Operand Hi) Sm8xGlobalAddress(EmitterContext context, Sm8xInst inst, int urStart, int wideBit = -1)
         {
             bool wide = inst.Bit(wideBit >= 0 ? wideBit : urStart >= 0 ? 90 : 72);

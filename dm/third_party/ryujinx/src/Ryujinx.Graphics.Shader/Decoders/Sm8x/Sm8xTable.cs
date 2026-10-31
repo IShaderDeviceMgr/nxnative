@@ -149,6 +149,7 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
             Set(0x986, InstEmit.Sm8xStg, Sm8xKind.Store);
             Set(0x386, InstEmit.Sm8xStg, Sm8xKind.Store);
             Set(0x9a8, InstEmit.Sm8xAtomg, Sm8xKind.Store);
+            Set(0x98e, InstEmit.Sm8xRed, Sm8xKind.Store);
             Set(0x3a8, InstEmit.Sm8xAtomg, Sm8xKind.Store);
             Set(0xb9b, InstEmit.Sm8xSust, Sm8xKind.Store);
             Set(0xb97, InstEmit.Sm8xSuld);
