@@ -6896,9 +6896,12 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             else {
                 id<MTLBuffer> db; size_t doff = arena_alloc(DMSH_DRV_SIZE, &db); uint8_t *d = (uint8_t *)db.contents + doff; memset(d, 0, DMSH_DRV_SIZE);
                 if (bank == 0) {
-                    int base = c0_ssbo_base(nvn_stage);
+                    // SM8x (Switch 2) compute keeps its table at DMSH_C0_SSBO_CS_SM8X with DMSH_C0_SSBO_SLOTS_SM8X slots, not Maxwell's 0x310 (dmsh_abi.h; the build maps the reflection the same way, dmsh_build.py
+                    // reflect). Every compute shader of a Switch 2 game is SM8x. Switch 1 and the graphics stages keep their tables
+                    const int sm8x_cs = DM_GAME_SWITCH2 && nvn_stage == 5, nslots = sm8x_cs ? DMSH_C0_SSBO_SLOTS_SM8X : DMSH_C0_SSBO_SLOTS;
+                    int base = sm8x_cs ? DMSH_C0_SSBO_CS_SM8X : c0_ssbo_base(nvn_stage);
                     if (base < 0) RED_ONCE(45, "stage %d shader reads driver segment c0; the storage buffer table base was never measured", nvn_stage);
-                    else for (int r = 0; r < DMSH_C0_SSBO_SLOTS; r++) { uint64_t a = S.ssbo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ssbo[nvn_stage][r].size; memcpy(d + base + DMSH_C0_ROW * r, &a, 8); memcpy(d + base + DMSH_C0_ROW * r + 8, &n, 4); }
+                    else for (int r = 0; r < nslots; r++) { uint64_t a = S.ssbo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ssbo[nvn_stage][r].size; memcpy(d + base + DMSH_C0_ROW * r, &a, 8); memcpy(d + base + DMSH_C0_ROW * r + 8, &n, 4); }
                     // Compute also has the dispatch size at 0x200 (x, y, z) and the uniform buffer table at 0x210 + 16 r (address 64 bits, size 32 bits), ending where the storage buffer table
                     // starts (0x310). Measured on Link's Awakening's light culling (light_culling_compute.bfsha): tile index = workgroup y × c0[0x200] + workgroup x, and c0[0x280] is
                     // the address of uniform buffer 7 (the light parameters, 144 bytes per light); Breath of the Wild's compute shaders read 0x280 / 0x290 / 0x2d0 of the same table

@@ -1055,6 +1055,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             // because constant buffer are always encoded as the second operand,
             // so the second operand will always be the one from the last instruction.
 
+            // nxnative: when exactly the first of two constant buffer operands is from the driver reserved buffer, it is the base. SM8x emits c0[slot address] + c1[byte offset]
+            // (the reverse of Maxwell's order), which made c1[0] the base and the c0 slot word the offset: the storage buffer got no register
+            if (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer &&
+                src1.GetCbufSlot() == DriverReservedCb && src2.GetCbufSlot() != DriverReservedCb)
+            {
+                return GetBaseAddressCbWithOffset(src1, src2, constOffset);
+            }
+
             if (src1.Type != OperandType.ConstantBuffer ||
                 (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer) ||
                 (src2.Type == OperandType.ConstantBuffer && src2.GetCbufSlot() == DriverReservedCb))

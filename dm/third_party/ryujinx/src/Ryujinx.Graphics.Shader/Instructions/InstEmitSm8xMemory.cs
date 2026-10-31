@@ -51,13 +51,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // ULDC: URd = c[bank][offset] (0xab9), or c[bank][URa + signed offset] (0xabb, the opcode note); size 73..75 (B32, B64)
+        // ULDC: URd = c[bank][offset] (0xab9), or c[bank][URa + signed offset] (0xabb, the opcode note); size 73..75 as LDC's (U8 S8 U16 S16 B32 B64).
+        // The 8 and 16 bit sizes (CuAssembler's sm_86 modifiers: ULDC.64 sets bit 73, .U8 clears bit 75, .U16 clears bit 74, .S8 subtracts 3 from the field; Donkey Kong Bananza's pixel shaders load
+        // ULDC.U8 URd, c[4][0x3c]) extract the byte or half word of the 32-bit word as LDC does, sign- or zero-extended
         public static void Sm8xUldc(EmitterContext context)
         {
             Sm8xInst inst = Sm8xHelper.Inst(context);
             LsSize2 size = (LsSize2)inst.Bits(73, 3);
 
-            if (size is not LsSize2.B32 and not LsSize2.B64)
+            if (size > LsSize2.B64)
             {
                 Sm8xHelper.Unsupported(context, $"ULDC size {size}");
             }
@@ -68,11 +70,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (!indexed)
             {
-                int word = inst.Bits(38, 16) >> 2;
+                int offset = inst.Bits(38, 16);
+                int word = offset >> 2;
 
                 for (int index = 0; index < count; index++)
                 {
-                    Sm8xHelper.SetUr(context, inst.URd + index, Cbuf(slot, word + index));
+                    Operand value = Cbuf(slot, word + index);
+
+                    if (size < LsSize2.B32)
+                    {
+                        value = ExtractSmallInt(context, (LsSize)size, Const((offset & 3) * 8), value);
+                    }
+
+                    Sm8xHelper.SetUr(context, inst.URd + index, value);
                 }
 
                 return;
@@ -83,7 +93,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             for (int index = 0; index < count; index++)
             {
-                Sm8xHelper.SetUr(context, inst.URd + index, EmitLoadConstant(context, Const(slot), context.IAdd(wordOffset, Const(index))));
+                Operand value = EmitLoadConstant(context, Const(slot), context.IAdd(wordOffset, Const(index)));
+
+                if (size < LsSize2.B32)
+                {
+                    value = ExtractSmallInt(context, (LsSize)size, GetBitOffset(context, addr), value);
+                }
+
+                Sm8xHelper.SetUr(context, inst.URd + index, value);
             }
         }
 
@@ -259,14 +276,56 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AtomOp atomOp = (AtomOp)inst.Bits(87, 3);
             int type = inst.Bits(73, 3);
 
-            if (type > 1 || atomOp is not (AtomOp.Add or AtomOp.Min or AtomOp.Max or AtomOp.And or AtomOp.Or or AtomOp.Xor))
+            // Types 3 (F32) and 4 (F16x2), NAK set_atom_type (73..75), only for Add: neither the IR nor Metal has an atomic float add on global memory, so it is a compare-and-swap loop
+            bool isFloat = type is 3 or 4;
+
+            if (isFloat ? atomOp != AtomOp.Add : type > 1 || atomOp is not (AtomOp.Add or AtomOp.Min or AtomOp.Max or AtomOp.And or AtomOp.Or or AtomOp.Xor))
             {
                 Sm8xHelper.Unsupported(context, $"reduction {atomOp} type {type}");
             }
 
             bool ugpr = inst.Bit(91);
             (Operand lo, Operand hi) = Sm8xGlobalAddress(context, inst, ugpr ? 64 : -1, ugpr ? 90 : 72);
+
+            if (isFloat)
+            {
+                EmitFloatReduction(context, lo, hi, Sm8xHelper.Gpr(inst.Rb), type == 4);
+                return;
+            }
+
             EmitAtomicOp(context, StorageKind.GlobalMemory, atomOp, type == 0 ? AtomSize.U32 : AtomSize.S32, lo, hi, Sm8xHelper.Gpr(inst.Rb));
+        }
+
+        // [address] += value for F32 or two packed halves (F16x2: each half added on its own, the sum rounded to half): load, add, compare-and-swap, and retry with the value the swap
+        // saw until it succeeds. Rounding is the host's round-to-nearest (RED's .RN); the SM8x flush-to-zero flag (.FTZ) is not applied. SM8x: unverified, whether F16x2 adds are done in half precision
+        // or in float and rounded once (the two agree except for double rounding in rare ties)
+        private static void EmitFloatReduction(EmitterContext context, Operand lo, Operand hi, Operand value, bool f16x2)
+        {
+            Operand old = Local();
+            context.Copy(old, context.Load(StorageKind.GlobalMemory, lo, hi));
+
+            Operand lblRetry = Label();
+            context.MarkLabel(lblRetry);
+
+            Operand sum;
+
+            if (f16x2)
+            {
+                Operand low = context.FPAdd(context.UnpackHalf2x16Low(old), context.UnpackHalf2x16Low(value));
+                Operand high = context.FPAdd(context.UnpackHalf2x16High(old), context.UnpackHalf2x16High(value));
+
+                sum = context.PackHalf2x16(low, high);
+            }
+            else
+            {
+                sum = context.FPAdd(old, value);
+            }
+
+            Operand seen = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, lo, hi, old, sum);
+            Operand swapped = context.ICompareEqual(seen, old);
+
+            context.Copy(old, seen);
+            context.BranchIfFalse(lblRetry, swapped);
         }
 
         private static (Operand Lo, Operand Hi) Sm8xGlobalAddress(EmitterContext context, Sm8xInst inst, int urStart, int wideBit = -1)

@@ -883,11 +883,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // FLO: index of the highest set bit (signed 73: of the highest bit differing from the sign), -1 when none; .SH (74) gives 31 - index.
-        // SM8x: unverified bits (NAK OpFlo)
+        // SM8x: unverified bits (NAK OpFlo). UFLO (0x2bd, NAK encode_ualu(0x0bd), bit 91 set) is the same on UR: CuAssembler lists UFLO.U32 / UFLO.U32.SH with .SH at bit 74
         public static void Sm8xFlo(EmitterContext context)
         {
             Sm8xInst inst = I(context);
-            Operand src = context.BitwiseNot(Sm8xHelper.SrcSecond(context, inst, false).Value, inst.Bit(63));
+            bool u = Sm8xHelper.IsUniformAlu(inst);
+            Operand src = context.BitwiseNot(Sm8xHelper.SrcSecond(context, inst, u).Value, inst.Bit(63));
             Operand res = inst.Bit(73) ? context.FindMSBS32(src) : context.FindMSBU32(src);
 
             if (inst.Bit(74))
@@ -895,7 +896,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 res = context.ConditionalSelect(context.ICompareEqual(res, Const(-1)), Const(-1), context.ISubtract(Const(31), res));
             }
 
-            Sm8xHelper.SetGpr(context, inst.Rd, res);
+            Sm8xHelper.SetReg(context, u ? inst.URd : inst.Rd, res, u);
         }
 
         // S2R / S2UR: special register 72..79, the numbering Maxwell's S2R uses (CuAssembler's SR_TID.X, SR_CTAID.X, SR_LANEID ... records)
@@ -987,6 +988,88 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 Sm8xHelper.SetPred(context, inst.Bits(81, 3), EmitVote(context, (VoteMode)inst.Bits(72, 2), pred));
             }
+        }
+
+        // MATCH (0x3a1, NAK OpMatch): .ANY (bit 79 set) Rd = the mask of the active lanes whose value equals this lane's; .ALL (bit 79 clear) Rd = the active mask when every active lane
+        // holds the same value, else 0, and P(81..83) = that outcome. Ra (24..31) is the value, a register pair with .U64 (bit 73). Neither the IR nor Metal has a subgroup match, so
+        // it is emulated: each of the 32 lanes' values is read with a shuffle and compared with this lane's, and only the active lanes (a ballot of true) count. Switch 2's GPU
+        // warps are 32 lanes wide. Donkey Kong Bananza's effect compute shaders use MATCH.ALL.U64 to see whether a whole warp updates one address (then one atomic does it).
+        public static void Sm8xMatch(EmitterContext context)
+        {
+            Sm8xInst inst = I(context);
+            bool u64 = inst.Bit(73);
+            bool any = inst.Bit(79);
+
+            Operand lo = Sm8xHelper.Gpr(inst.Ra);
+            Operand hi = u64 ? Sm8xHelper.Gpr(inst.Ra + 1) : null;
+            Operand active = EmitBallot(context, Const(IrConsts.True));
+            Operand mask = Const(0);
+
+            for (int lane = 0; lane < 32; lane++)
+            {
+                (Operand otherLo, _) = context.Shuffle(lo, Const(lane), Const(0x1f));
+                Operand equal = context.ICompareEqual(otherLo, lo);
+
+                if (u64)
+                {
+                    (Operand otherHi, _) = context.Shuffle(hi, Const(lane), Const(0x1f));
+                    equal = context.BitwiseAnd(equal, context.ICompareEqual(otherHi, hi));
+                }
+
+                Operand isActive = context.ICompareNotEqual(context.BitwiseAnd(active, Const(1 << lane)), Const(0));
+
+                mask = context.BitwiseOr(mask, context.ConditionalSelect(context.BitwiseAnd(equal, isActive), Const(1 << lane), Const(0)));
+            }
+
+            if (any)
+            {
+                Sm8xHelper.SetGpr(context, inst.Rd, mask);
+            }
+            else
+            {
+                Operand all = context.ICompareEqual(mask, active);
+
+                Sm8xHelper.SetGpr(context, inst.Rd, context.ConditionalSelect(all, active, Const(0)));
+                Sm8xHelper.SetPred(context, inst.Bits(81, 3), all);
+            }
+        }
+
+        // REDUX (0x3c4, NAK OpRedux): URd = the reduction of Ra over the active lanes; op 78..80 (0 AND, 1 OR, 2 XOR, 3 SUM, 4 MIN, 5 MAX), signed compare (MIN, MAX) bit 73.
+        // The IR has no subgroup reduction, so it is emulated like MATCH: every lane's value is read with a shuffle and folded in, the inactive lanes contributing the operation's identity
+        public static void Sm8xRedux(EmitterContext context)
+        {
+            Sm8xInst inst = I(context);
+            int op = inst.Bits(78, 3);
+            bool signed = inst.Bit(73);
+
+            if (op > 5)
+            {
+                Sm8xHelper.Unsupported(context, $"reduction {op}");
+            }
+
+            Operand value = Sm8xHelper.Gpr(inst.Ra);
+            Operand active = EmitBallot(context, Const(IrConsts.True));
+            Operand identity = Const(op switch { 0 => -1, 4 => signed ? int.MaxValue : -1, 5 => signed ? int.MinValue : 0, _ => 0 });
+            Operand res = null;
+
+            for (int lane = 0; lane < 32; lane++)
+            {
+                (Operand other, _) = context.Shuffle(value, Const(lane), Const(0x1f));
+                Operand isActive = context.ICompareNotEqual(context.BitwiseAnd(active, Const(1 << lane)), Const(0));
+                Operand v = context.ConditionalSelect(isActive, other, identity);
+
+                res = res == null ? v : op switch
+                {
+                    0 => context.BitwiseAnd(res, v),
+                    1 => context.BitwiseOr(res, v),
+                    2 => context.BitwiseExclusiveOr(res, v),
+                    3 => context.IAdd(res, v),
+                    4 => signed ? context.IMinimumS32(res, v) : context.IMinimumU32(res, v),
+                    _ => signed ? context.IMaximumS32(res, v) : context.IMaximumU32(res, v),
+                };
+            }
+
+            Sm8xHelper.SetUr(context, inst.URd, res);
         }
 
         // FSWZADD: A op B per quad lane, the four 2-bit lane operations in 32..39 with lane 0 in the high bits (NAK OpFSwzAdd); Maxwell's FSWZADD keeps lane 0 low

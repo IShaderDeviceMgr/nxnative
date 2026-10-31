@@ -89,6 +89,7 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
             Alu(0x099, InstEmit.Sm8xShf, 1, 2, 4);
             Alu(0x091, InstEmit.Sm8xLea, 1, 2, 4);
             Alu(0x087, InstEmit.Sm8xSel, 1, 4);
+            Alu(0x0bd, InstEmit.Sm8xFlo, 1, 4);
             Alu(0x096, InstEmit.Sm8xPrmt, 1, 2, 4);
             Set(0xc82, InstEmit.Sm8xUmov);
             Set(0x882, InstEmit.Sm8xUmov);
@@ -103,6 +104,8 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
             Set(0x883, InstEmit.Sm8xP2r);
             Set(0x886, InstEmit.Sm8xVote);
             Set(0x806, InstEmit.Sm8xVote);
+            Set(0x3c4, InstEmit.Sm8xRedux, Sm8xKind.Shuffle);
+            Set(0x3a1, InstEmit.Sm8xMatch, Sm8xKind.Shuffle);
 
             // Constant buffer loads
             Set(0xb82, InstEmit.Sm8xLdc);
@@ -111,6 +114,11 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
 
             // Attributes
             Set(0x326, InstEmit.Sm8xIpa, Sm8xKind.Attribute);
+            // SM8x: unverified. 0x526 is in neither NAK nor CuAssembler. It is IPA's layout (0x326 + 0x200: attribute word at 64..71, destination 16..23, bit 81..83 = PT) with a uniform
+            // register in Ra (24..29) and bit 91 set. In the four Bananza pixel shaders that use it (12 instructions, all three reads of generic attribute 0 at a[0x80], a[0x84], a[0x88]) the
+            // results are multiplied by the reciprocal of IPA a[0x7c] exactly as 0x326's are, and the UR operand (UR4) is 0 there: the prologue sets UR5 = URZ and UR4 = (UR5:URZ) << UR4.
+            // So it is read as IPA.PASS with the UR operand ignored
+            Set(0x526, InstEmit.Sm8xIpa, Sm8xKind.Attribute);
             Set(0x321, InstEmit.Sm8xAld, Sm8xKind.Attribute);
             Set(0x322, InstEmit.Sm8xAst, Sm8xKind.Attribute);
             Set(0x923, InstEmit.Sm8xIsberd);

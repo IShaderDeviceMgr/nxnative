@@ -85,6 +85,7 @@ namespace Ryujinx.Graphics.Shader.Decoders.Sm8x
             (0x322, "AST"),
             (0x324, "OUT"),
             (0x326, "IPA"),
+            (0x526, "IPA.UR"),
             (0x343, "CALL"),
             (0x344, "CALL"),
             (0x348, "WARPSYNC"),

@@ -403,7 +403,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
             switch (kind)
             {
                 case Sm8xKind.Attribute:
-                    if (inst.Opcode == 0x326)
+                    if (inst.Opcode is 0x326 or 0x526)
                     {
                         // IPA: attribute byte address / 4 in bits 64..71 (NAK OpIpa); no indexed form
                         SetUserAttributeUses(definitions, context, inst.Bits(64, 8) << 2, 1, isStore: false, indexed: false, perPatch: false);
