@@ -645,6 +645,32 @@ namespace Ryujinx.Graphics.Shader.Translation
             Properties.AddOrUpdateConstantBuffer(new(BufferLayout.Std140, setIndex, binding, name, type));
         }
 
+        // nxnative: the guest memory map, a storage buffer the host fills with the guest address ranges of its memory pools and the offset from each guest address to the host GPU
+        // address of the same byte (nvn_mtl.m guest_map; layout in GlobalToStorage.GenerateGuestMapLookup). Declared by the first global memory access no storage buffer slot was found
+        // for, named guest_map_w once one of them writes (the host then counts the draw or dispatch as a GPU write it cannot place)
+        private SetBindingPair _guestMap = new(-1, -1);
+        private bool _guestMapWritten;
+
+        public int GetGuestMapBinding(bool write)
+        {
+            if (_guestMap.Binding < 0)
+            {
+                _guestMap = _gpuAccessor.CreateStorageBufferBinding(0);
+            }
+
+            _guestMapWritten |= write;
+            Properties.UsesHostMemory = true;
+
+            StructureType type = new(new[]
+            {
+                new StructureField(AggregateType.Array | AggregateType.U32, "data", 0),
+            });
+
+            Properties.AddOrUpdateStorageBuffer(new(BufferLayout.Std430, _guestMap.SetIndex, _guestMap.Binding, _guestMapWritten ? "guest_map_w" : "guest_map", type));
+
+            return _guestMap.Binding;
+        }
+
         private void AddNewStorageBuffer(int setIndex, int binding, string name)
         {
             StructureType type = new(new[]

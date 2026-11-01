@@ -19,6 +19,9 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         public IReadOnlyDictionary<int, MemoryDefinition> LocalMemories => _localMemories;
         public IReadOnlyDictionary<int, MemoryDefinition> SharedMemories => _sharedMemories;
 
+        // nxnative: the shader reaches guest memory through raw host GPU addresses (StorageKind.HostMemory): SPIR-V needs the PhysicalStorageBuffer64 addressing model
+        public bool UsesHostMemory { get; set; }
+
         public ShaderProperties()
         {
             _constantBuffers = new Dictionary<int, BufferDefinition>();

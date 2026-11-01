@@ -599,6 +599,32 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
     pthread_mutex_unlock(&g_mu);
     return ok;
 }
+// The guest memory map: a shader whose global memory access the translator traced to no storage buffer slot (the game computed the pointer: Donkey Kong Bananza's floor culling reset,
+// vertex shader 0459a55e79335cf6, stores {0, 1, 0, 0, 0} through pointers it loads from a table) looks the guest address up here and goes to the host GPU address of the same byte
+// (GlobalToStorage.cs GenerateGuestMapLookup, binding kind DMSH_KIND_GUEST_MAP). 32-bit words: n, 3 unused, then n entries of 8 words sorted by guest start: guest start, guest end, host
+// offset (host GPU address − guest address), 64 bits each, 2 unused. Remade when a pool is added or removed (the old one is released once the GPU work using it completes). Such a shader
+// can reach any pool, so every pool is put into the residency set when a map is made (pool_res; on demand otherwise). Overlapping pools: the search finds the last one starting at or before
+// the address. Caller holds nothing
+static __strong id<MTLBuffer> g_gmap; static uint64_t g_gmap_gen, g_gmap_gpu;
+static int gmap_cmp(const void *a, const void *b) { uint64_t x = ((const uint64_t *)a)[0], y = ((const uint64_t *)b)[0]; return x < y ? -1 : x > y; }
+static uint64_t guest_map_gpu(void) {
+    uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
+    if (g_gmap && g_gmap_gen == gen) return g_gmap_gpu;
+    pthread_mutex_lock(&g_mu);
+    gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
+    int n = g_npool > 0 ? g_npool : 1;
+    id<MTLBuffer> b = [g_dev newBufferWithLength:16 + 32ull * n options:MTLResourceStorageModeShared];   // all 0: one empty entry when there is no pool
+    uint64_t *e = (uint64_t *)((uint8_t *)b.contents + 16);
+    *(uint32_t *)b.contents = (uint32_t)n;
+    for (int i = 0; i < g_npool; i++) { pool_res(i); e[4 * i] = g_pools[i].lo; e[4 * i + 1] = g_pools[i].hi; e[4 * i + 2] = g_pools[i].gpu - g_pools[i].base; }
+    qsort(e, (size_t)g_npool, 32, gmap_cmp);
+    res_add(b); res_commit();
+    if (g_gmap) defer_obj_release(g_gmap);
+    g_gmap = b; g_gmap_gpu = b.gpuAddress; g_gmap_gen = gen;
+    { static int nlog; if (nlog++ < 4) MLOG("guest memory map: %d memory pools, all resident (a shader reaches guest memory through addresses no storage buffer holds)", g_npool); }
+    pthread_mutex_unlock(&g_mu);
+    return g_gmap_gpu;
+}
 
 // ---------- Submission ----------
 static void defer_reset(void); static void defer_fallback(void);
@@ -4638,7 +4664,7 @@ static void swrite_note(NvProg *pr) {
     if (!pr) return;
     if (g_pass_swrite) { g_vbuf_write_epoch++; return; }   // further shader writes also invalidate aligned vertex snapshots
     for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
-        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP)) { g_pass_swrite = 1; g_vbuf_write_epoch++; return; } }
+        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP || sh->rf.b[i].kind == NVN_RB_GMAP)) { g_pass_swrite = 1; g_vbuf_write_epoch++; return; } }
 }
 static void udc_note_draw(NvProg *pr) {
     int td = tbdr_on();
@@ -4657,7 +4683,7 @@ static void udc_note_draw(NvProg *pr) {
         if (st == 1) shader_color_mask = sh->rf.color_known ? sh->rf.color_mask : UINT32_MAX;
         // A writable image, atomic image pointer or storage pointer may alias an attachment. Do not infer its identity from bound texture slots (bindless shaders need not use them).
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
-            if (b->rw && (b->kind == NVN_RB_IMG || b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_SBUFU)) { image_write = 1; break; } }
+            if (b->rw && (b->kind == NVN_RB_IMG || b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_SBUFU || b->kind == NVN_RB_GMAP)) { image_write = 1; break; } }
         if (image_write) break;
     }
     if (R.has_rt) for (int i = 1; i < R.rt.n && i < 8; i++)   // a slot attached twice (left unattached) really written: the writes are lost (see rt_dup_slot)
@@ -6889,6 +6915,10 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             id<MTLBuffer> cb = sh->c1buf ? sh->c1buf : zero_bank();   // c1 has length 0 (600 of them in the whole library) yet the shader still declares it: reads 0
             slots[aid] = (sh->c1buf ? sh->c1_gpu : zero_bank_gpu()) + (sh->c1buf ? sh->c1off : 0);
             USE(cb, MTLResourceUsageRead);
+        } else if (b->kind == NVN_RB_GMAP) {   // B: the guest memory map (guest_map_gpu); a shader writing through it writes memory no range here names
+            slots[aid] = guest_map_gpu();
+            if (b->rw) sbw_note(0, 0, SBW_GPU);
+            if (bl) PD("B %llu st%d guest_map %s", g_stat_pass, nvn_stage, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_SUPPORT) {   // support_buffer: scale 1.0, BGRA swap 0, viewport transform not disabled (viewport fields are not read)
             slots[aid] = support_gpu();
             USE(support_buf(), MTLResourceUsageRead);
@@ -8793,7 +8823,8 @@ static void ubp_check(uint64_t lo, uint64_t hi, const uint8_t *sh) {
 // cannot be read from memory (ubp_get; a binding counts only as far as the shader can read it, cb_len), a bindless handle in such a part, or their data read as vertices, indices, indirect
 // arguments or a storage buffer. Then the pass ends first and the updates land before the draw, as before
 static int ubd_conflict_sh(NvShader *sh, int st) {   // one stage's bindings (encode_args binds the vertex, fragment and compute stages)
-    for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; if (b->reg >= (b->kind == NVN_RB_SBUFP ? NSSBO : 16)) continue;
+    for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; if (b->kind == NVN_RB_GMAP) return 1;   // may read any memory
+        if (b->reg >= (b->kind == NVN_RB_SBUFP ? NSSBO : 16)) continue;
         const p_bind_buf *u = b->kind == NVN_RB_SBUFP ? &S.ssbo[st][b->reg] : &S.ubo[st][b->reg];
         if (!u->addr) continue;
         if (b->kind == NVN_RB_CBUF) { uint64_t g, ul = cb_len(sh, b->reg, u->size); const uint8_t *c;
@@ -9072,7 +9103,7 @@ static int csh_draw_reads(NvProg *pr, const p_draw *dw, const p_draw_idx *di, cs
                     if (!t.serial || !csh_add(r, n, (uint64_t)t.mem, t.L.size)) return 0;
                     break; }
                 case NVN_RB_TEXU: case NVN_RB_TEXD: case NVN_RB_TEXA: return 0;
-                case NVN_RB_SBUFP: case NVN_RB_SBUFU: case NVN_RB_IMG: case NVN_RB_TBUF: return 0;   // may write memory, or reads memory not listed here
+                case NVN_RB_SBUFP: case NVN_RB_SBUFU: case NVN_RB_IMG: case NVN_RB_TBUF: case NVN_RB_GMAP: return 0;   // may write memory, or reads memory not listed here
                 default: break; } } }
     return 1;
 }
@@ -9083,7 +9114,7 @@ static int csh_cs(NvShader *cs, const p_dispatch *dp, csh_rng *w, int *nw, int *
         switch (b->kind) {
             case NVN_RB_SBUFP: if (b->reg >= NSSBO || csh_attachment_hit(S.ssbo[5][b->reg].addr, S.ssbo[5][b->reg].size) || !csh_add(w, nw, S.ssbo[5][b->reg].addr, S.ssbo[5][b->reg].size)) return 0; break;
             case NVN_RB_CBUF: case NVN_RB_UBOP: if (b->reg >= 16 || csh_attachment_hit(S.ubo[5][b->reg].addr, S.ubo[5][b->reg].size)) return 0; break;
-            case NVN_RB_SBUFU: case NVN_RB_IMG: case NVN_RB_TEXU: case NVN_RB_TEXD: case NVN_RB_TEXA: return 0;
+            case NVN_RB_SBUFU: case NVN_RB_IMG: case NVN_RB_TEXU: case NVN_RB_TEXD: case NVN_RB_TEXA: case NVN_RB_GMAP: return 0;
             case NVN_RB_TEX: case NVN_RB_TBUF: { uint64_t h = tex_slot_h(S.tex[5], S.img[5], b->reg); int tid = (int)(h & 0xfffff); if (!tid) break;
                 os_unfair_lock_lock(&g_rmu); tex_t t = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t : (tex_t){0}; os_unfair_lock_unlock(&g_rmu);
                 if (!t.serial) return 0;
@@ -10439,7 +10470,7 @@ void mtl_exec(const uint8_t *p) {
                     // here, so the continuation is begun with the buffer and its samples are counted (they used not to be: RED "occlusion query counting began in a pass without a visibility buffer")
                     if (g_enc && !g_enc_has_vis) { PD("M %llu occlusion query counting starts: render pass split here", g_stat_pass); rp_end(); } }
                 break; }
-            case OP_CLEAR_BUF: { const p_clear_buf *cb = a; mtl_sub_fill(cb->addr, cb->size, cb->value); break; }
+            case OP_CLEAR_BUF: { const p_clear_buf *cb = a; PD("Y clear_buf cmd=%p dst=%#llx bytes=%llu value=%#x", p, (unsigned long long)cb->addr, (unsigned long long)cb->size, cb->value); mtl_sub_fill(cb->addr, cb->size, cb->value); break; }
             case OP_COPY_B2B: { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8);
                 PD("Y copy_b2b cmd=%p src=%#llx dst=%#llx bytes=%llu", p, (unsigned long long)s_, (unsigned long long)d, (unsigned long long)n); mtl_sub_copy(s_, d, n); break; }
             case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8);

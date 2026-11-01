@@ -660,9 +660,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             targetCbs.Sort();
 
+            // nxnative: with no storage buffer slot the access goes through the guest memory map to the host GPU address (GenerateHostMemoryOp) on SPIR-V
+            bool hostMemory = targetCbs.Count == 0 && targetLanguage == TargetLanguage.Spirv;
+
             if (targetCbs.Count == 0)
             {
-                gpuAccessor.Log($"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
+                gpuAccessor.Log(hostMemory
+                    ? $"Global memory operation \"{operation.Inst}\" with no storage buffer: through the guest memory map."
+                    : $"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
             }
 
             if (gtsContext.TryGetFunctionId(operation, isMultiTarget: true, targetCbs, out functionId))
@@ -754,6 +759,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 }
 
                 context.MarkLabel(lblSkip);
+            }
+
+            if (hostMemory)
+            {
+                Operand compare = inArgumentsCount == 4 ? Argument(2) : null;
+                Operand value = inArgumentsCount == 4 ? Argument(3) : inArgumentsCount == 3 ? Argument(2) : null;
+
+                GenerateHostMemoryOp(resourceManager, context, operation.Inst, operation.StorageKind, globalAddressLow, globalAddressHigh, compare, value);
             }
 
             bool returnsValue = operation.Dest != null;
@@ -963,6 +976,158 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
 
             return true;
+        }
+
+        // nxnative: a global memory access whose address no storage buffer slot was found for: the game computed the pointer itself (Donkey Kong Bananza's floor culling reset,
+        // vertex shader 0459a55e79335cf6, stores {0, 1, 0, 0, 0} through a pointer it loads from a table, one per vertex). The guest address is looked up in the guest memory map
+        // (GenerateGuestMapLookup) and the access goes to the host GPU address of the same byte, then returns; an address in no memory pool falls through to the caller's end
+        // (loads read 0, writes are dropped, as before)
+        private static void GenerateHostMemoryOp(
+            ResourceManager resourceManager,
+            EmitterContext context,
+            Instruction inst,
+            StorageKind storageKind,
+            Operand addrLow,
+            Operand addrHigh,
+            Operand compare,
+            Operand value)
+        {
+            bool isStore = inst.IsAtomic() || inst == Instruction.Store;
+            int binding = resourceManager.GetGuestMapBinding(isStore);
+
+            Operand found = GenerateGuestMapLookup(context, binding, addrLow, addrHigh, out Operand hostLow, out Operand hostHigh);
+
+            Operand lblMiss = Label();
+            context.BranchIfFalse(lblMiss, found);
+
+            // the map's offsets are multiples of 4 KB (pages map to pages), so the host address has the guest address's byte within its word
+            Operand wordLow = context.BitwiseAnd(hostLow, Const(-4));
+            Operand resultValue = null;
+
+            if (inst.IsAtomic())
+            {
+                if (IsSmallInt(storageKind))
+                {
+                    throw new NotImplementedException();
+                }
+
+                resultValue = inst switch
+                {
+                    Instruction.AtomicAdd => context.AtomicAdd(StorageKind.HostMemory, wordLow, hostHigh, value),
+                    Instruction.AtomicAnd => context.AtomicAnd(StorageKind.HostMemory, wordLow, hostHigh, value),
+                    Instruction.AtomicCompareAndSwap => context.AtomicCompareAndSwap(StorageKind.HostMemory, wordLow, hostHigh, compare, value),
+                    Instruction.AtomicMaxS32 => context.AtomicMaxS32(StorageKind.HostMemory, wordLow, hostHigh, value),
+                    Instruction.AtomicMaxU32 => context.AtomicMaxU32(StorageKind.HostMemory, wordLow, hostHigh, value),
+                    Instruction.AtomicMinS32 => context.AtomicMinS32(StorageKind.HostMemory, wordLow, hostHigh, value),
+                    Instruction.AtomicMinU32 => context.AtomicMinU32(StorageKind.HostMemory, wordLow, hostHigh, value),
+                    Instruction.AtomicOr => context.AtomicOr(StorageKind.HostMemory, wordLow, hostHigh, value),
+                    Instruction.AtomicSwap => context.AtomicSwap(StorageKind.HostMemory, wordLow, hostHigh, value),
+                    Instruction.AtomicXor => context.AtomicXor(StorageKind.HostMemory, wordLow, hostHigh, value),
+                    _ => throw new NotImplementedException(inst.ToString()),
+                };
+            }
+            else if (inst == Instruction.Store)
+            {
+                int bitSize = storageKind switch
+                {
+                    StorageKind.GlobalMemoryS8 or
+                    StorageKind.GlobalMemoryU8 => 8,
+                    StorageKind.GlobalMemoryS16 or
+                    StorageKind.GlobalMemoryU16 => 16,
+                    _ => 32,
+                };
+
+                if (bitSize < 32)
+                {
+                    Operand bitOffset = HelperFunctionManager.GetBitOffset(context, hostLow);
+                    Operand lblLoopHead = Label();
+
+                    context.MarkLabel(lblLoopHead);
+
+                    Operand oldValue = context.Load(StorageKind.HostMemory, wordLow, hostHigh);
+                    Operand newValue = context.BitfieldInsert(oldValue, value, bitOffset, Const(bitSize));
+                    Operand casResult = context.AtomicCompareAndSwap(StorageKind.HostMemory, wordLow, hostHigh, oldValue, newValue);
+
+                    context.BranchIfTrue(lblLoopHead, context.ICompareNotEqual(casResult, oldValue));
+                }
+                else
+                {
+                    context.Store(StorageKind.HostMemory, wordLow, hostHigh, value);
+                }
+            }
+            else
+            {
+                resultValue = context.Load(StorageKind.HostMemory, wordLow, hostHigh);
+
+                if (IsSmallInt(storageKind))
+                {
+                    Operand bitOffset = HelperFunctionManager.GetBitOffset(context, hostLow);
+
+                    switch (storageKind)
+                    {
+                        case StorageKind.GlobalMemoryS8:
+                            resultValue = context.BitfieldExtractS32(context.ShiftRightS32(resultValue, bitOffset), Const(0), Const(8));
+                            break;
+                        case StorageKind.GlobalMemoryS16:
+                            resultValue = context.BitfieldExtractS32(context.ShiftRightS32(resultValue, bitOffset), Const(0), Const(16));
+                            break;
+                        case StorageKind.GlobalMemoryU8:
+                            resultValue = context.BitwiseAnd(context.ShiftRightU32(resultValue, bitOffset), Const(byte.MaxValue));
+                            break;
+                        case StorageKind.GlobalMemoryU16:
+                            resultValue = context.BitwiseAnd(context.ShiftRightU32(resultValue, bitOffset), Const(ushort.MaxValue));
+                            break;
+                    }
+                }
+            }
+
+            if (resultValue != null)
+            {
+                context.Return(resultValue);
+            }
+            else
+            {
+                context.Return();
+            }
+
+            context.MarkLabel(lblMiss);
+        }
+
+        // nxnative: the guest memory map (nvn_mtl.m guest_map), 32-bit words: word 0 = n (at least 1), then n entries of 8 words from word 4, sorted by guest address and not
+        // overlapping: guest start (low, high), guest end (low, high), host offset (low, high: host GPU address − guest address, modulo 2^64), 2 unused. A binary search of fixed
+        // length (GuestMapSteps halvings, up to 2^GuestMapSteps entries) finds the last entry starting at or before the address, then checks that the address is before its end
+        private const int GuestMapSteps = 16;
+
+        private static Operand GenerateGuestMapLookup(EmitterContext context, int binding, Operand addrLow, Operand addrHigh, out Operand hostLow, out Operand hostHigh)
+        {
+            Operand Word(Operand entry, int word) =>
+                context.Load(StorageKind.StorageBuffer, binding, Const(0), context.IAdd(context.ShiftLeft(entry, Const(3)), Const(4 + word)));
+
+            // x <= address, address < x: unsigned 64-bit
+            Operand AtOrBefore(Operand xLow, Operand xHigh) =>
+                context.BitwiseOr(context.ICompareLessUnsigned(xHigh, addrHigh), context.BitwiseAnd(context.ICompareEqual(xHigh, addrHigh), context.ICompareLessOrEqualUnsigned(xLow, addrLow)));
+            Operand Before(Operand xLow, Operand xHigh) =>
+                context.BitwiseOr(context.ICompareLessUnsigned(addrHigh, xHigh), context.BitwiseAnd(context.ICompareEqual(addrHigh, xHigh), context.ICompareLessUnsigned(addrLow, xLow)));
+
+            Operand count = context.Load(StorageKind.StorageBuffer, binding, Const(0), Const(0));
+            Operand last = context.ISubtract(count, Const(1));
+            Operand entry = Const(0);
+
+            for (int step = GuestMapSteps - 1; step >= 0; step--)
+            {
+                Operand probe = context.IAdd(entry, Const(1 << step));
+                Operand clamped = context.IMinimumU32(probe, last);   // never reads past the map
+                Operand take = context.BitwiseAnd(context.ICompareLessUnsigned(probe, count), AtOrBefore(Word(clamped, 0), Word(clamped, 1)));
+                entry = context.ConditionalSelect(take, probe, entry);
+            }
+
+            Operand found = context.BitwiseAnd(AtOrBefore(Word(entry, 0), Word(entry, 1)), Before(Word(entry, 2), Word(entry, 3)));
+
+            hostLow = context.IAdd(addrLow, Word(entry, 4));
+            Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(hostLow, addrLow), Const(1), Const(0));
+            hostHigh = context.IAdd(context.IAdd(addrHigh, Word(entry, 5)), carry);
+
+            return found;
         }
 
         private static Operand GenerateAtomicCasLoop(EmitterContext context, Operand wordOffset, int binding, Func<Operand, Operand> opCallback)

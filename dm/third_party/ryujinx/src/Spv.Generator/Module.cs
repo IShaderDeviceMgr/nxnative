@@ -160,6 +160,32 @@ namespace Spv.Generator
             _executionModes.Add(executionModeInstruction);
         }
 
+        // nxnative: OpLoad / OpStore through a PhysicalStorageBuffer pointer, which take the Aligned memory operand with its alignment literal (the generated Load / Store have no literal)
+        public Instruction LoadAligned(Instruction resultType, Instruction pointer, int alignment)
+        {
+            Instruction result = NewInstruction(Op.OpLoad, GetNewId(), resultType);
+
+            result.AddOperand(pointer);
+            result.AddOperand(MemoryAccessMask.Aligned);
+            result.AddOperand((LiteralInteger)alignment);
+            AddToFunctionDefinitions(result);
+
+            return result;
+        }
+
+        public Instruction StoreAligned(Instruction pointer, Instruction obj, int alignment)
+        {
+            Instruction result = NewInstruction(Op.OpStore);
+
+            result.AddOperand(pointer);
+            result.AddOperand(obj);
+            result.AddOperand(MemoryAccessMask.Aligned);
+            result.AddOperand((LiteralInteger)alignment);
+            AddToFunctionDefinitions(result);
+
+            return result;
+        }
+
         private void AddToFunctionDefinitions(Instruction instruction)
         {
             Debug.Assert(instruction.Opcode != Op.OpTypeInt);

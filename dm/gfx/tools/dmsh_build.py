@@ -630,6 +630,7 @@ def reflect(key, stage, msl, res, sm8x=False):
         if nm in dmsh_geometry.HELPERS: e.update(kind=abi.KIND_GEOMETRY, reg=dmsh_geometry.HELPERS[nm])
         elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
+        elif nm in ('guest_map', 'guest_map_w'): e.update(kind=abi.KIND_GUEST_MAP, rw=nm == 'guest_map_w')   # the translator names it guest_map_w once an access writes (ResourceManager.GetGuestMapBinding)
         elif re.fullmatch(r'[a-z]+_c(\d+)', nm):
             n = int(re.fullmatch(r'[a-z]+_c(\d+)', nm).group(1))
             e.update(kind=abi.KIND_CBUF, reg=n - 3) if 3 <= n <= 16 else e.update(kind=abi.KIND_CBUF, reg=abi.PUSH_UBO_REG) if n == abi.PUSH_BANK else e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)   # NVN 2 push constants (dmsh_abi.h DMSH_PUSH_BANK)
