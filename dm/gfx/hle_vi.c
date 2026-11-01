@@ -76,13 +76,21 @@ HLE_FORCE("_ZN2nn2vi8FinalizeEv", "display service shutdown; the host has no vi 
 //   a Display that is not the default one); the Set Layer* HDR functions and the swap interval ones are Results too (their callers ignore them). Bananza asks QueryDisplayVrrSupported and
 //   QueryDisplayHdrStatus each frame it updates its window; a "not supported" answer makes it call SetDisplayVrrCapability(false) and ClearLayerExtendedSwapInterval once and fall back
 //   to the NVN window's present interval (the 0x204c30 setter, nvnWindowSetPresentInterval) for its 30 fps cap. It sets SetLayerExtendedSwapInterval(layer, 1, fps) only when VRR is
-//   reported supported, so the extended interval never replaces the NVN present interval here.
+//   reported supported.
+// VRR: reported supported when the host can show frames off the 60 Hz grid, a screen faster than 60 Hz (ProMotion) with the display link presenting (mtl_vrr_capable, nvn_mtl.m;
+//   DM_VRR=0 / 1 overrides). With it Bananza runs another frame-rate controller (main+0x204640, called from +0x2036b4 only while VRR is on): fps = 60 / (frame cost in vsyncs + margin),
+//   clamped and stepped; at 40 fps and up (setter +0x204934) it calls SetDisplayVrrCapability(true) and SetLayerExtendedSwapInterval(layer, 1, fps) and paces itself, sleeping until
+//   1 / fps after its frame start (+0x20430c), with present interval 1; below 40 it clears both and sets present interval ceil(60 / fps) as without VRR. While the extended interval is
+//   set, the display link runs at 120 Hz and takes each frame on the next refresh (dm_vi_vrr_fps; link_sync in nvn_mtl.m), instead of holding it to a 60 Hz vsync.
 // HDR is not implemented yet: reported as unavailable (QueryDisplayHdrStatus: not HDR). Planned: HDR through EDR on the front end's CAMetalLayer (the Mac's XDR display supports it);
-//   the metadata the game sets is kept below for it. VRR is not implemented yet: reported as unavailable. Planned: ProMotion's adaptive refresh, fed by the extended swap interval.
+//   the metadata the game sets is kept below for it.
 static _Atomic uint32_t g_hdr_gamut = ~0u, g_hdr_tonemap = ~0u, g_hdr_std = ~0u, g_hdr_ext = ~0u;   // last values the game set, ~0 = none yet (kept for the HDR work)
 static _Atomic uint32_t g_vrr_cap = ~0u, g_ext_swap = ~0u;   // the game's VRR capability flag; the extended swap interval (a | b << 16), ~0 = none/cleared
 uint32_t dm_vi_hdr_metadata(int which) { return which == 0 ? g_hdr_gamut : which == 1 ? g_hdr_tonemap : which == 2 ? g_hdr_std : g_hdr_ext; }
 uint32_t dm_vi_vrr_capability(void) { return g_vrr_cap; }
+// The frame rate the game paces itself to while it uses VRR (the extended swap interval's second value), 0 when it does not
+int dm_vi_vrr_fps(void) { uint32_t s = g_ext_swap; return g_vrr_cap == 1 && s != ~0u ? (int)(s >> 16) : 0; }
+__attribute__((weak)) int mtl_vrr_capable(void) { return 0; }   // nvn_mtl.m; graphics unit tests without it have no VRR
 // the HdrOutputFormat of the answer is not read by Bananza when HDR is off (a stack local it never uses); 0 is written. The u16 is, in Bananza's use, a luminance in nits (its minimum
 // with a cap of the game's, times the paper-white scale, becomes the layer's luminance range): 100, the SDR reference white
 HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", "HDR status: not HDR (HDR is not implemented yet)", Result, h_vi_HdrStatus, uint8_t *hdr, int *format, uint16_t *nits, const void *disp) {
@@ -111,19 +119,19 @@ HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_
     if (atomic_exchange(&g_hdr_std, v) != v) LOG("vi::SetLayerNextHdrStandardContentLuminanceRangeMetadata %u %u (kept; HDR is not implemented yet)", a, b);
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "VRR support: none (VRR is not implemented yet)", Result, h_vi_VrrSupported, uint8_t *out, const void *disp) {
-    (void)disp; if (out) *out = 0;
-    static int once; if (!once++) LOG("vi::QueryDisplayVrrSupported: no (VRR is not implemented yet; planned through ProMotion's adaptive refresh)");
+// Asked each window update: a change (the window moved to another screen) switches the game's controller at its next update
+HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "VRR support: when the screen and the display link can show frames off the 60 Hz grid", Result, h_vi_VrrSupported, uint8_t *out, const void *disp) {
+    (void)disp; int on = mtl_vrr_capable() != 0; if (out) *out = (uint8_t)on;
+    static _Atomic int was = -1; if (atomic_exchange(&was, on) != on) LOG("vi::QueryDisplayVrrSupported: %s", on ? "yes (the display link follows the game's frames on a screen faster than 60 Hz)" : "no (no screen faster than 60 Hz, or the display link is off)");
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "the game's VRR capability flag; kept and logged, not used yet", void, h_vi_VrrCap, void *disp, int on) {
-    (void)disp; on &= 1; if (atomic_exchange(&g_vrr_cap, (uint32_t)on) != (uint32_t)on) LOG("vi::SetDisplayVrrCapability %d (kept; VRR is not implemented yet)", on);
+HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "the game's VRR capability flag", void, h_vi_VrrCap, void *disp, int on) {
+    (void)disp; on &= 1; if (atomic_exchange(&g_vrr_cap, (uint32_t)on) != (uint32_t)on) LOG("vi::SetDisplayVrrCapability %d", on);
 }
-// SetLayerExtendedSwapInterval(layer, 1, fps): Bananza sets it only when VRR is reported supported (its frame cap for the adaptive refresh); without VRR it paces by the NVN present
-// interval, which the host already follows. Kept and logged; planned for the VRR work
-HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "extended swap interval; kept and logged, not used yet (VRR is not implemented yet)", Result, h_vi_ExtSwap, void *layer, int a, int b) {
+// SetLayerExtendedSwapInterval(layer, 1, fps): the game's frame cap while it uses VRR; it paces itself to it, the display link takes each frame on the next refresh
+HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "extended swap interval: the game's frame cap under VRR", Result, h_vi_ExtSwap, void *layer, int a, int b) {
     (void)layer; uint32_t v = (uint32_t)(a & 0xffff) | (uint32_t)b << 16;
-    if (atomic_exchange(&g_ext_swap, v) != v) LOG("vi::SetLayerExtendedSwapInterval %d %d (kept; VRR is not implemented yet)", a, b);
+    if (atomic_exchange(&g_ext_swap, v) != v) LOG("vi::SetLayerExtendedSwapInterval %d %d", a, b);
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", "clear the extended swap interval; kept and logged", Result, h_vi_ExtSwapClear, void *layer) {

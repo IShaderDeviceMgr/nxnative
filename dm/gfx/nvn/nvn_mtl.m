@@ -11445,6 +11445,13 @@ static void *link_main(void *arg) {   // Display link thread: started when switc
     g_link_started = 0;
     return NULL;
 }
+// VRR (hle_vi.c): the host shows frames off the 60 Hz grid when the display link presents on a screen faster than 60 Hz (ProMotion): at 120 Hz each frame
+// waits at most 8.3 ms for a refresh. DM_VRR=1 reports it on any screen and without a window (headless: the game's VRR controller runs, unpaced by a link), DM_VRR=0 never
+__attribute__((weak)) int dm_vi_vrr_fps(void) { return 0; }   // hle_vi.c: the game's frame cap while it uses VRR, 0 = it does not; graphics unit tests have none
+int mtl_vrr_capable(void) {
+    static int env = -2; if (env == -2) { const char *e = getenv("DM_VRR"); env = e ? atoi(e) != 0 : -1; }
+    return env >= 0 ? env : g_dm_present_link && !atomic_load(&g_rescue_mode) && front_screen_max_fps() > 60;
+}
 static void link_sync(void) {   // Called every frame by the game's present thread: aligns the display link object's state to g_dm_present_link and the power-saving mode (can change at run time)
     static int applied;
     pthread_mutex_lock(&g_pq_mu);
@@ -11457,6 +11464,7 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     if (g_rescue_mode) want = 0;
     pthread_mutex_unlock(&g_pq_mu);
     if (want && mtl_fps_target() == 30) want = 3;   // Power-saving mode: display link at 30 Hz
+    else if (want == 1 && dm_vi_vrr_fps() > 0) want = 2;   // VRR (the game's extended swap interval): a 120 Hz link takes each frame on the next refresh; the acquire still waits a 60 Hz vsync at least
     if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);
     // The screen's rate changed (switched by front_screen_match, or another screen): the range again, virtual ticks or none. Taken only once the link object exists, so a change
     // while its thread starts (after link_main read the rate) is not lost
