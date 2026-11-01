@@ -82,41 +82,51 @@ HLE_FORCE("_ZN2nn2vi8FinalizeEv", "display service shutdown; the host has no vi 
 //   clamped and stepped; at 40 fps and up (setter +0x204934) it calls SetDisplayVrrCapability(true) and SetLayerExtendedSwapInterval(layer, 1, fps) and paces itself, sleeping until
 //   1 / fps after its frame start (+0x20430c), with present interval 1; below 40 it clears both and sets present interval ceil(60 / fps) as without VRR. While the extended interval is
 //   set, the display link runs at 120 Hz and takes each frame on the next refresh (dm_vi_vrr_fps; link_sync in nvn_mtl.m), instead of holding it to a 60 Hz vsync.
-// HDR is not implemented yet: reported as unavailable (QueryDisplayHdrStatus: not HDR). Planned: HDR through EDR on the front end's CAMetalLayer (the Mac's XDR display supports it);
-//   the metadata the game sets is kept below for it.
-static _Atomic uint32_t g_hdr_gamut = ~0u, g_hdr_tonemap = ~0u, g_hdr_std = ~0u, g_hdr_ext = ~0u;   // last values the game set, ~0 = none yet (kept for the HDR work)
+// HDR (HDR10 through EDR): reported when the window's screen can show more than SDR white (mtl_hdr_peak, nvn_mtl.m; DM_HDR=0 / 1 overrides), with that screen's peak luminance and the
+//   BT.2408 reference white, 203 nits, as the paper white. On it Bananza re-creates its NVN window as RGB10A2 (format 0x3d, was RGBA8 0x25) and its last pass (fs fbc8d9ef451aabed) writes
+//   PQ (SMPTE ST 2084) in BT.2020 (SetLayerNextHdrContentGamutMetadata 1), scaled so that paper white is the reported paper white and clipped to the luminance ranges it sets
+//   (SetLayerNext*ContentLuminanceRangeMetadata: standard 0..203, extended 0..peak). The present then shows that window through a PQ / BT.2020 layer with HDR10 metadata
+//   (nvn_mtl.m hdr_layer_sync): macOS maps 203 nits to SDR white and tone-maps the rest to the screen's headroom. Its own SDR fallback (an RGBA8 window) follows when the answer turns SDR
+//   (the window moved to an SDR screen): the game asks each window update.
+static _Atomic uint32_t g_hdr_gamut = ~0u, g_hdr_tonemap = ~0u, g_hdr_std = ~0u, g_hdr_ext = ~0u;   // last values the game set, ~0 = none yet
 static _Atomic uint32_t g_vrr_cap = ~0u, g_ext_swap = ~0u;   // the game's VRR capability flag; the extended swap interval (a | b << 16), ~0 = none/cleared
+static _Atomic int g_hdr_on;   // what QueryDisplayHdrStatus last answered
+int dm_vi_hdr_on(void) { return g_hdr_on; }
 uint32_t dm_vi_hdr_metadata(int which) { return which == 0 ? g_hdr_gamut : which == 1 ? g_hdr_tonemap : which == 2 ? g_hdr_std : g_hdr_ext; }
 uint32_t dm_vi_vrr_capability(void) { return g_vrr_cap; }
 // The frame rate the game paces itself to while it uses VRR (the extended swap interval's second value), 0 when it does not
 int dm_vi_vrr_fps(void) { uint32_t s = g_ext_swap; return g_vrr_cap == 1 && s != ~0u ? (int)(s >> 16) : 0; }
 __attribute__((weak)) int mtl_vrr_capable(void) { return 0; }   // nvn_mtl.m; graphics unit tests without it have no VRR
-// the HdrOutputFormat of the answer is not read by Bananza when HDR is off (a stack local it never uses); 0 is written. The u16 is, in Bananza's use, a luminance in nits (its minimum
-// with a cap of the game's, times the paper-white scale, becomes the layer's luminance range): 100, the SDR reference white
-HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", "HDR status: not HDR (HDR is not implemented yet)", Result, h_vi_HdrStatus, uint8_t *hdr, int *format, uint16_t *nits, const void *disp) {
-    (void)disp; if (hdr) *hdr = 0; if (format) *format = 0; if (nits) *nits = 100;
-    static int once; if (!once++) LOG("vi::QueryDisplayHdrStatus: SDR (HDR is not implemented yet; planned through EDR on the CAMetalLayer)");
+__attribute__((weak)) int mtl_hdr_peak(void) { return 0; }   // nvn_mtl.m: the screen's peak luminance in nits when it can show HDR, 0 = SDR; graphics unit tests have none
+#define HDR_PAPER_WHITE 203   // nits: ITU-R BT.2408's reference white for HDR10, which the HDR10 layer metadata maps to SDR white (nvn_mtl.m)
+// HdrOutputFormat: not read by Bananza (a stack local it never uses); 0 is written. The u16 is the screen's peak luminance in nits (the game takes its minimum with a cap of its own; times
+// the paper-white scale it becomes the layer's luminance range); 100, SDR white, when not HDR
+HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", "HDR status: HDR10 when the window's screen has EDR headroom", Result, h_vi_HdrStatus, uint8_t *hdr, int *format, uint16_t *nits, const void *disp) {
+    (void)disp; int peak = mtl_hdr_peak(), on = peak > 0;
+    if (hdr) *hdr = (uint8_t)on; if (format) *format = 0; if (nits) *nits = (uint16_t)(on ? peak : 100);
+    if (atomic_exchange(&g_hdr_on, on) != on) LOG("vi::QueryDisplayHdrStatus: %s", on ? "HDR (the window's screen has EDR headroom; HDR10 through EDR)" : "SDR");
+    static _Atomic int was_peak; if (on && atomic_exchange(&was_peak, peak) != peak) LOG("vi::QueryDisplayHdrStatus: peak %d nits, paper white %d nits", peak, HDR_PAPER_WHITE);
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "HDR paper white: 100 nits, the SDR reference white (HDR is not implemented yet)", Result, h_vi_HdrPaperWhite, uint16_t *nits, const void *disp) {
-    (void)disp; if (nits) *nits = 100; return RES_OK;
+HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "HDR paper white: BT.2408's 203 nits in HDR, 100 in SDR", Result, h_vi_HdrPaperWhite, uint16_t *nits, const void *disp) {
+    (void)disp; if (nits) *nits = g_hdr_on ? HDR_PAPER_WHITE : 100; return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", "HDR content gamut; kept and logged, not used yet", Result, h_vi_HdrGamut, void *layer, int gamut) {
-    (void)layer; if (atomic_exchange(&g_hdr_gamut, (uint32_t)gamut) != (uint32_t)gamut) LOG("vi::SetLayerNextHdrContentGamutMetadata %d (kept; HDR is not implemented yet)", gamut);
+HLE_FORCE("_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", "HDR content gamut; the present picks the layer's color space from it", Result, h_vi_HdrGamut, void *layer, int gamut) {
+    (void)layer; if (atomic_exchange(&g_hdr_gamut, (uint32_t)gamut) != (uint32_t)gamut) LOG("vi::SetLayerNextHdrContentGamutMetadata %d", gamut);
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", "HDR to SDR tone mapping; kept and logged, not used yet", Result, h_vi_HdrTone, void *layer, int mode) {
-    (void)layer; if (atomic_exchange(&g_hdr_tonemap, (uint32_t)mode) != (uint32_t)mode) LOG("vi::SetLayerNextHdrToSdrToneMappingMetadata %d (kept; HDR is not implemented yet)", mode);
+HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", "HDR to SDR tone mapping; kept and logged (macOS tone-maps the HDR10 layer itself)", Result, h_vi_HdrTone, void *layer, int mode) {
+    (void)layer; if (atomic_exchange(&g_hdr_tonemap, (uint32_t)mode) != (uint32_t)mode) LOG("vi::SetLayerNextHdrToSdrToneMappingMetadata %d (kept)", mode);
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", "HDR extended content luminance range; kept and logged, not used yet", Result, h_vi_HdrExt, void *layer, unsigned a, unsigned b) {
+HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", "HDR extended content luminance range: the HDR10 layer metadata's maximum", Result, h_vi_HdrExt, void *layer, unsigned a, unsigned b) {
     (void)layer; a &= 0xffff; b &= 0xffff; uint32_t v = a | b << 16;
-    if (atomic_exchange(&g_hdr_ext, v) != v) LOG("vi::SetLayerNextHdrExtendedContentLuminanceRangeMetadata %u %u (kept; HDR is not implemented yet)", a, b);
+    if (atomic_exchange(&g_hdr_ext, v) != v) LOG("vi::SetLayerNextHdrExtendedContentLuminanceRangeMetadata %u %u", a, b);
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", "HDR standard content luminance range; kept and logged, not used yet", Result, h_vi_HdrStd, void *layer, unsigned a, unsigned b) {
+HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", "HDR standard content luminance range; kept and logged", Result, h_vi_HdrStd, void *layer, unsigned a, unsigned b) {
     (void)layer; a &= 0xffff; b &= 0xffff; uint32_t v = a | b << 16;
-    if (atomic_exchange(&g_hdr_std, v) != v) LOG("vi::SetLayerNextHdrStandardContentLuminanceRangeMetadata %u %u (kept; HDR is not implemented yet)", a, b);
+    if (atomic_exchange(&g_hdr_std, v) != v) LOG("vi::SetLayerNextHdrStandardContentLuminanceRangeMetadata %u %u", a, b);
     return RES_OK;
 }
 // Asked each window update: a change (the window moved to another screen) switches the game's controller at its next update

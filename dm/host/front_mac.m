@@ -19,6 +19,7 @@
 #include "motion_pro_mac.h"
 #include <signal.h>
 #include <math.h>
+#include <stdatomic.h>
 
 static CAMetalLayer *g_layer;
 static uint64_t g_btn;
@@ -28,6 +29,13 @@ static int g_input_on = 1;   // main thread: the game window is key, so its keyb
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
 int front_screen_max_fps(void) { return g_screen_fps; }
+static _Atomic int g_screen_edr;   // the window's screen's potential EDR headroom x 100 (100 = SDR only, 1600 on a MacBook Pro's XDR screen), kept up to date as the window moves and the
+                                  // screens' settings change (HDR turned on or off for a monitor)
+int front_screen_edr(void) { return g_screen_edr; }   // nvn_mtl.m mtl_hdr_peak: HDR is reported to the game above 100
+static void screen_edr_update(NSScreen *scr) {   // main thread
+    int v = scr ? (int)lround(scr.maximumPotentialExtendedDynamicRangeColorComponentValue * 100) : 100;
+    if (atomic_exchange(&g_screen_edr, v) != v) LOG("front end: screen EDR headroom %.2f (%s)", v / 100.0, v > 100 ? "HDR" : "SDR");
+}
 static _Atomic int g_fullscreen;   // the window is in fullscreen (set when it has entered and when it has left)
 int front_fullscreen(void) { return g_fullscreen; }   // nvn_mtl.m link_latency: frame latency 2 in fullscreen
 // The screen's refresh rate matched to the game's frame rate in fullscreen (front_screen_match, from PR #79; DM_SCREEN_MATCH=0 turns it off). 60 fps on a 144 Hz screen cannot be paced
@@ -271,6 +279,7 @@ void front_run(void (*guest)(void)) {
         [win center];
         [win makeKeyAndOrderFront:nil];
         g_screen_fps = (int)(win.screen ?: NSScreen.mainScreen).maximumFramesPerSecond;
+        screen_edr_update(win.screen ?: NSScreen.mainScreen);
         g_win = win;
         [NSApp activateIgnoringOtherApps:YES];
         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
@@ -300,7 +309,8 @@ void front_run(void (*guest)(void)) {
         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
         // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (win.screen) { g_screen_fps = (int)win.screen.maximumFramesPerSecond; g_layer.contentsScale = win.backingScaleFactor; } screen_match_apply(); }];
+        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (win.screen) { g_screen_fps = (int)win.screen.maximumFramesPerSecond; g_layer.contentsScale = win.backingScaleFactor; screen_edr_update(win.screen); } screen_match_apply(); }];
+        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; screen_edr_update(win.screen); }];
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
         [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
