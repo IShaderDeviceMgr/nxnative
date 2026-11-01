@@ -213,7 +213,7 @@ HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_
 HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoERKS4_", "amiibo nickname and owner settings applet (with the old register info): no tag", Result, h_nfp_Nick2, NfpDeviceHandle *h, uint8_t *changed, void *reg, const void *p, const void *tag, const void *old) { (void)h; (void)reg; (void)p; (void)tag; (void)old; if (changed) *changed = 0; return nfp_no_tag("StartNicknameAndOwnerSettings"); }
 
 // ---------- vi: vsync event ----------
-// The game passes a SystemEventType; after binding, a host thread fires it at the console's vsync rate, 60 Hz (120 Hz for a Switch 2 game; DM_VSYNC_HZ can change it). While the display link presents, the event follows its ticks, as a
+// The game passes a SystemEventType; after binding, a host thread fires it at 60 Hz (DM_VSYNC_HZ can change it). While the display link presents, the event follows its ticks, as a
 // Switch's follows its display: Super Mario Galaxy 2 runs the Wii's VI retrace (and with it each emulated frame) on this event, and on a clock of the host's own the frames drifted
 // against the screen's vsyncs, two in some display-link ticks and none in others (iPhone: about one tick in seven, a stutter the frame-rate counter showed as 50 to 60).
 // One thread per binding lifetime: repeated requests must not double its rate.
@@ -232,15 +232,14 @@ static int vsync_tick(vsync_event_t *v) {   // 0: the event is gone and this thr
     LOG("vi: vsync event %p destroyed by the game, its thread ends", v->ev);
     return 0;
 }
-__attribute__((weak)) int mtl_link_wait_vsync(uint64_t *seen, int unit_hz, uint64_t timeout_ns) { (void)seen; (void)unit_hz; (void)timeout_ns; return 0; }   // nvn_mtl.m
+__attribute__((weak)) int mtl_link_wait_vsync(uint64_t *seen, uint64_t timeout_ns) { (void)seen; (void)timeout_ns; return 0; }   // nvn_mtl.m
 static void *vsync_thread(void *arg) {
     vsync_event_t *v = arg;
     dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // the game paces frames on this event
-    const char *e = getenv("DM_VSYNC_HZ"); const int console_hz = DM_GAME_SWITCH2 ? 120 : 60;   // the console display's vsync rate (the present interval's unit, see CONSOLE_VSYNC_HZ in hle_nvn.c)
-    double hz = e ? atof(e) : console_hz; if (hz <= 0) hz = console_hz;
+    const char *e = getenv("DM_VSYNC_HZ"); double hz = e ? atof(e) : 60.0; if (hz <= 0) hz = 60.0;
     uint64_t period = (uint64_t)(1e9 / hz), next = now_ns() + period, seen = 0;
     for (;;) {
-        if (!e && mtl_link_wait_vsync(&seen, console_hz, 2 * period)) { if (!vsync_tick(v)) break; next = now_ns() + period; continue; }
+        if (!e && mtl_link_wait_vsync(&seen, 2 * period)) { if (!vsync_tick(v)) break; next = now_ns() + period; continue; }
         uint64_t t = now_ns(); if (next > t) { struct timespec ts = {(time_t)((next - t) / 1000000000ull), (long)((next - t) % 1000000000ull)}; nanosleep(&ts, NULL); }
         if (!vsync_tick(v)) break;
         next += period; if (now_ns() > next + 4 * period) next = now_ns() + period;   // do not try to catch up when far behind
@@ -251,7 +250,7 @@ static void *vsync_thread(void *arg) {
 HLE_FORCE("_ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii", "indirect layer image memory: RGBA8 linear, 4 KB aligned", Result, h_vi_IndirectReq, size_t *size, size_t *align, int w, int h) {
     *size = ((size_t)(w > 0 ? w : 0) * (size_t)(h > 0 ? h : 0) * 4 + 0xfff) & ~(size_t)0xfff; *align = 0x1000; return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", "vsync event: a host thread signals it at the console's vsync rate", Result, h_vi_VsyncEvent, void *ev, void *disp) {
+HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", "vsync event: a host thread signals it at 60 Hz", Result, h_vi_VsyncEvent, void *ev, void *disp) {
     (void)disp; hle_bind_system_event(ev, 1);
     uint64_t binding = hle_system_event_binding(ev);
     pthread_mutex_lock(&g_vs_mu);
@@ -262,7 +261,7 @@ HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7Displa
         pthread_t th; if (pthread_create(&th, NULL, vsync_thread, v)) die("cannot start the vsync thread"); pthread_detach(th);
     }
     pthread_mutex_unlock(&g_vs_mu);
-    LOG("vi::GetDisplayVsyncEvent: %p signalled by the host at %d Hz%s", ev, DM_GAME_SWITCH2 ? 120 : 60, running ? " (its thread already runs)" : ""); return RES_OK;
+    LOG("vi::GetDisplayVsyncEvent: %p signalled by the host at 60 Hz%s", ev, running ? " (its thread already runs)" : ""); return RES_OK;
 }
 
 // ---------- diag ----------

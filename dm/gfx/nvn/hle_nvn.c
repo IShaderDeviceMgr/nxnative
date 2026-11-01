@@ -96,8 +96,6 @@ static void nvn_init_slots(void) {
 
 #define NVN_NFUNC_SWITCH1 537   // names.txt lines before the NVN 2 block
 _Static_assert(NVN_NFUNC >= NVN_NFUNC_SWITCH1, "the name table lost names");
-// The console's vsync rate: the unit of a present interval and of the vi vsync event. A Switch 1 display refreshes at 60 Hz; the Switch 2's at 120 Hz (Donkey Kong Bananza sets interval 3 for a steady 40 fps), so the same game logic on a 60 Hz tick ran at half its frame rate
-#define CONSOLE_VSYNC_HZ (DM_GAME_SWITCH2 ? 120 : 60)
 #define NVN_NFUNC_AVAIL (DM_GAME_SWITCH2 ? NVN_NFUNC : NVN_NFUNC_SWITCH1)   // the names this game can look up
 // The name table is the Switch 1 names (the first NVN_NFUNC_SWITCH1, in the order of main's tables: slot numbers matter) and then the names only NVN 2 (Switch 2) games ask for
 // (names.txt, a sorted block appended after the earlier ones; dm/games/README.md `console`). A Switch 1 game does not get them: it logs the unknown-name red line and receives null, as before.
@@ -1440,12 +1438,12 @@ static void dump_frame(void) {
 static double g_tw[6][TWIN]; static unsigned g_tn[6];
 static double g_pres_iv[TWIN]; static unsigned g_presn;   // Present interval (ms; -1 = dropped by the system, 0 = no reading)
 static double g_pres_exp[TWIN], g_pres_exp_last;   // how long that frame should have stayed on screen (ms, pres_expect_ms); the last one for slow_emit
-// The hold (console vsyncs, CONSOLE_VSYNC_HZ) each present was given, by present number. On-screen intervals are read 8 presents late, so each is judged against the holds of its own presents:
+// The hold (60 Hz vsyncs) each present was given, by present number. On-screen intervals are read 8 presents late, so each is judged against the holds of its own presents:
 // with the frame step at 2 vsyncs every frame stays 33.3 ms, which is not a dropped frame
 static uint8_t g_hold_ring[16];
 static double pres_expect_ms(uint64_t n) {   // the interval between presents n - 1 and n shows frame n - 1: the display link holds it for its own present's hold, the Mac pacer spaces present n by n's, so the larger of the two
     int k = g_hold_ring[n % 16] > g_hold_ring[(n - 1) % 16] ? g_hold_ring[n % 16] : g_hold_ring[(n - 1) % 16];
-    double held = (k ? k : 1) * 1000.0 / CONSOLE_VSYNC_HZ, tgt = 1000.0 / mtl_fps_target();   // at least one frame period of the target (33.3 ms when the game itself asks for 30)
+    double held = (k ? k : 1) * 1000.0 / 60, tgt = 1000.0 / mtl_fps_target();   // at least one frame period of the target (33.3 ms when the game itself asks for 30)
     return held > tgt ? held : tgt;
 }
 __attribute__((weak)) double dm_brightness_now(void) { return -1; }
@@ -1631,7 +1629,7 @@ static void sleep_until_ns(uint64_t dl) {   // absolute time on the monotonic cl
     uint64_t now = now_ns(); if (dl <= now) return;
     mach_wait_until(mach_absolute_time() + (dl - now) * tb.denom / tb.numer);
 }
-// Present is fixed at the console's vsync rate (60 Hz; 120 Hz for a Switch 2 game, CONSOLE_VSYNC_HZ): the adaptive mechanism stepped down at frame 60 in 24/24 real-device logs and never came back up, so for this phase 60 fps is the hard floor.
+// Present is fixed at 60 Hz: the adaptive mechanism stepped down at frame 60 in 24/24 real-device logs and never came back up, so for this phase 60 fps is the hard floor.
 // DM_PRESENT_HZ=0 (uncapped frame rate) serves only as an explicit performance profiling switch: some of the game's UI logic counts frames (with the same save, uncapped gives
 // 4181 SaveIndicatorPanel entries and capped at 60 fps gives 0, which matches the ground truth), so uncapped is a semantically wrong way to run and must not be used as a criterion / cross-check / default. Unit tests set it directly with nvn_present_config
 static int g_hz = -1, g_display_mode;
@@ -1701,19 +1699,18 @@ static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
     int scr = mtl_display_hz();
-    const char *e = getenv("DM_PRESENT_HZ"); g_hz = e ? atoi(e) : CONSOLE_VSYNC_HZ;
+    const char *e = getenv("DM_PRESENT_HZ"); g_hz = e ? atoi(e) : 60;
     if (!g_hz) LOG("[nvn] [WARNING] DM_PRESENT_HZ=0: frame rate uncapped, frame pacing unlike the device, UI logic may drift (for profiling only, not for verdicts / cross-checks)");
     // Cut (intentional deviation from the original game's behavior): with DM_PRESENT_INTERVAL=display the present interval set by the game is not followed and one frame is presented per display-link tick,
     // with a fixed hard floor of 60 fps; the logic stays at 25 ticks, and the client's frame-counted UI logic is unaffected -
     // with the same save and the same input, the UI message streams of the two modes match message by message. Proof (before character select): r9 game / display 60 ×3 / display 120 ×2, 6 groups in total, uicmp consistent
     // (the save indicator is exempted as a timing race), and the timing differences of key messages are within game mode's own noise band; proof after entering a run is still missing, pending action script coverage
     const char *m = getenv("DM_PRESENT_INTERVAL"); g_display_mode = m ? !strcmp(m, "display") : DM_GAME_PRESENT_DISPLAY;
-    LOG("[nvn] present tick %d Hz%s, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, e ? " (DM_PRESENT_HZ)" : DM_GAME_SWITCH2 ? " (fixed: the Switch 2 console's vsync rate)" : " (fixed)", g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
-        m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
+    LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
+        m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window, fixed 60 Hz" : "no window, fixed 60 Hz");
 }
-#define ITV_30 (CONSOLE_VSYNC_HZ / 30)   // the interval of a 30 fps frame: 2 vsyncs of a 60 Hz console, 4 of a 120 Hz one (Switch 2 interval 3 = 40 fps keeps the 60 fps link)
-static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : CONSOLE_VSYNC_HZ / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // console vsyncs per frame that presentation follows
-// The acquire's wait for the display link: the present interval's vsyncs (console units: 60 Hz, 120 Hz for a Switch 2 game; mtl_link_wait_units), or with present_interval display above 60 Hz (DM_PRESENT_HZ=120 on a 120 Hz link,
+static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : 60 / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+// The acquire's wait for the display link: the present interval's vsyncs (60 Hz units), or with present_interval display above 60 Hz (DM_PRESENT_HZ=120 on a 120 Hz link,
 // DM_PRESENT_LINK=2) one tick of the present rate, as many link ticks as that takes. Before, a 120 Hz link waited two ticks per frame there, and display mode never went past 60 fps
 static int link_wait(const win_t *o, uint64_t timeout_ns) {
     static int hz_was, rate_was, remainder;   // acquire thread only, as with mtl_link_wait_ticks
@@ -1726,15 +1723,15 @@ static int link_wait(const win_t *o, uint64_t timeout_ns) {
         if (rate > hz) { remainder += rate; ticks = remainder / hz; remainder %= hz; }
         return mtl_link_wait_ticks(ticks, timeout_ns);
     }
-    return mtl_link_wait_units(present_itv(o), CONSOLE_VSYNC_HZ, timeout_ns);
+    return mtl_link_wait_tick(present_itv(o), timeout_ns);
 }
 static uint64_t present_period(const win_t *o) {
     present_cfg(o);
     int was = atomic_load(&g_game_itv), want = o->interval > 0 ? o->interval : 1;
     if (want != was) {
         atomic_store(&g_game_itv, want);
-        if (want < ITV_30) atomic_store(&g_itv2_since, 0);
-        else if (was < ITV_30) atomic_store(&g_itv2_since, now_ns() | 1);   // | 1: the start is never 0
+        if (want < 2) atomic_store(&g_itv2_since, 0);
+        else if (was < 2) atomic_store(&g_itv2_since, now_ns() | 1);   // | 1: the start is never 0
     }
     int itv = present_itv(o), hz = g_hz;
     return hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;

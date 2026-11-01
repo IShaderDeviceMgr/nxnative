@@ -54,6 +54,9 @@ static int detclock_cfg(void) {
 }
 static uint64_t wall_guest_ns(void) { return atomic_load(&g_gfz) ? atomic_load(&g_gfrozen) : now_ns() - atomic_load(&g_glag); }
 uint64_t guest_ns(void) { return atomic_load(&g_gdet_on) ? atomic_load(&g_gdet) : wall_guest_ns(); }
+// The system counter the guest reads (mrs cntpct / cntvct, svc GetSystemTick): 19.2 MHz on the Switch; 31.25 MHz (32 ns) on the Switch 2, whose SDK hard-codes that
+// frequency (nn::os::GetSystemTickFrequency returns 0x1dcd650 and ConvertToTimeSpan multiplies by 32; Donkey Kong Bananza's sdk+0x148d80 / +0x14a2c8)
+uint64_t guest_ticks(void) { uint64_t ns = guest_ns(); return DM_GAME_SWITCH2 ? ns / 32 : ns * 12 / 625; }
 int dm_detclock_enabled(void) { return detclock_cfg() && atomic_load(&g_gdet_on); }
 void dm_guest_frame_tick(void) {
     crash_watch_frame();

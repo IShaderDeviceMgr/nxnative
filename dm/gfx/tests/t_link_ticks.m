@@ -74,8 +74,6 @@ int main(void) { @autoreleasepool {
     CHECK(a == 2, "a 60 Hz vsync is two ticks of a 120 Hz link");
     CHECK(b == 1, "one own tick per frame: 120 frames a second");
     CHECK(c == 2, "two own ticks");
-    { uint64_t t0 = g_link_tick_n; for (int i = 0; i < 50; i++) mtl_link_wait_units(3, 120, 100000000ull);
-      CHECK(g_link_tick_n - t0 == 150, "a Switch 2 game's interval 3 (120 Hz vsyncs) is three ticks of a 120 Hz link"); }
     acquire_ticks(120, 1, 2, 1, "display 120 Hz ignores the game's interval");
     acquire_ticks(90, 1, 1, 4. / 3, "display 90 Hz preserves fractional ticks");
     acquire_ticks(75, 1, 1, 1.6, "display 75 Hz preserves fractional ticks");
@@ -96,8 +94,6 @@ int main(void) { @autoreleasepool {
     dm_fps_state = NULL;
     g_link_mode = 1;
     CHECK(mtl_link_rate() == 60, "a 60 Hz link reports 60");
-    { uint64_t t0 = g_link_tick_n; for (int i = 0; i < 50; i++) mtl_link_wait_units(3, 120, 100000000ull);
-      CHECK(g_link_tick_n - t0 == 75, "interval 3 in 120 Hz vsyncs is 1.5 ticks of a 60 Hz link, the fraction carried"); }
     a = per_wait(0, 1);
     CHECK(a == 1, "a 60 Hz link: one tick per vsync");
     acquire_ticks(120, 1, 1, 1, "a 60 Hz link limits display 120 Hz to one tick");

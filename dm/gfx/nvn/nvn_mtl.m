@@ -113,7 +113,6 @@ static uint64_t g_link_dropped;
 static uint64_t g_link_empty;   // Under g_pq_mu: ticks that found no new frame queued (counted here, not as ticks minus presents: presents before the link starts and while it is rescued are not on ticks)
 static double g_link_hold_until; static uint64_t g_link_held;   // Changed only on the display-link callback thread: the time the previous frame must stay on screen until by its present interval (0 = no hold), and the ticks that took no new frame because of it
 static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
-int g_link_auto120;   // a Switch 2 game's default 120 Hz link (no DM_PRESENT_LINK): link_sync falls back to 60 Hz on a screen that cannot refresh at 120
 int g_dm_present_link;   // Present pacing mode (runtime value of DM_PRESENT_LINK, modified directly during same-process alternating measurement): 0 = acquire the drawable itself; 1 = display link at 60 Hz; 2 = display link at 120 Hz, the game presents a frame every other display-link tick
 static int g_present_latency;   // DM_PRESENT_LATENCY: the display link's frame latency in a window and in fullscreen alike (0 = not set: link_latency picks it)
 static uint64_t g_pq_done;
@@ -387,7 +386,7 @@ void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
-    g_dm_present_link = link ? atoi(link) : DM_GAME_SWITCH2 ? 2 : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1; g_link_auto120 = !link && DM_GAME_SWITCH2;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
+    g_dm_present_link = link ? atoi(link) : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
     const char *latency = getenv("DM_PRESENT_LATENCY");
     if (latency && atoi(latency) > 0) g_present_latency = atoi(latency);
     g_res_check_on = getenv("DM_RES_CHECK") != NULL;
@@ -11358,7 +11357,6 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     static int applied;
     pthread_mutex_lock(&g_pq_mu);
     int want = g_dm_present_link;
-    if (want == 2 && g_link_auto120 && front_screen_max_fps() < 120) want = 1;   // the default 120 Hz link only where the screen has 120 Hz (a 60 Hz link counts a Switch 2 game's 120 Hz intervals by halves, mtl_link_wait_units)
     if (want < 0 || want > 2) { g_dm_present_link = applied == 3 ? 1 : applied; pthread_mutex_unlock(&g_pq_mu); return; }
     if (g_rescue_mode && (want != g_rescue_mode || now_ns() >= g_rescue_back_at)) {
         g_rescue_mode = 0; g_stall_t0 = 0; __atomic_store_n(&g_link_tick_ns, now_ns(), __ATOMIC_RELAXED);
@@ -11631,10 +11629,7 @@ int mtl_has_window(void) { return front_metal_layer() != NULL; }
 int mtl_link_active(void) { return link_on(); }
 int mtl_link_stalled(void) { return __atomic_load_n(&g_stall_t0, __ATOMIC_RELAXED) != 0; }   // the display link has gone silent and mtl_present_wait drops frames (see STALL_NS) until it calls back
 void mtl_link_pause(int on) { CAMetalDisplayLink *l = g_link; if (l) l.paused = on != 0; }   // For testing (DM_TEST_BG): imitates the system stopping the display-link callback in the background
-int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) { return mtl_link_wait_units(vsyncs, 60, timeout_ns); }
-// The wait for a present interval counted in vsyncs of the console's rate (unit_hz: 60, or 120 for a Switch 2 game, whose display refreshes at 120 Hz). Every unit_hz but 60 takes
-// interval * link rate / unit_hz ticks and carries the fraction (interval 3 on a 60 Hz link: 1, 2, 1, 2 ticks); 60 keeps the rounding below
-int mtl_link_wait_units(int vsyncs, int unit_hz, uint64_t timeout_ns) {
+int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) {
     if (!mtl_link_active()) return 0;
     // Wait for the display link only when running faster than the display: if a display-link tick has already passed since the previous frame started work (this frame is already behind), start immediately instead of waiting in vain for the next display-link tick --
     // otherwise when the frame time is slightly more than one display-link period it would "miss the tick -> wait another whole tick", locking the frame rate straight to half (measured on Mac under windowed load: runs of dropped frames)
@@ -11642,13 +11637,6 @@ int mtl_link_wait_units(int vsyncs, int unit_hz, uint64_t timeout_ns) {
     // A frame presented with interval N blocks the game for N vsyncs on the Switch, as the display callback holds it N ticks: games that scale their time step by the interval (BotW's VFR: interval / 2)
     // ran at double speed while they produced interval-2 frames every 60 Hz tick (iPhone log: Link sprinting with B, the interval flapping 1 ↔ 2)
     if (vsyncs < 1) vsyncs = 1;
-    if (unit_hz != 60) {
-        static int unit_was, rate_was, remainder;   // the game's present thread only, as with started_tick
-        int rate = mtl_link_rate();
-        if (unit_hz != unit_was || rate != rate_was) { remainder = 0; unit_was = unit_hz; rate_was = rate; }
-        remainder += vsyncs * rate; int ticks = remainder / unit_hz; remainder %= unit_hz;
-        return mtl_link_wait_ticks(ticks, timeout_ns);   // 0 ticks (an interval below one link tick) counts as 1 there
-    }
     return mtl_link_wait_ticks(g_link_mode == 3 ? (vsyncs + 1) / 2 : vsyncs * (g_link_mode == 2 ? 2 : 1), timeout_ns);
 }
 // The display link's rate: 120 Hz (DM_PRESENT_LINK=2), 60, or 30 in power-saving mode
@@ -11668,13 +11656,11 @@ int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
     pthread_mutex_unlock(&g_link_mu); return 1;
 }
 
-// The display's vsync for vi::GetDisplayVsyncEvent (hle_sdk16.c): returns 1 at the first display-link tick of the next vsync of the console's rate (unit_hz: 60, or 120 for a Switch 2 game) after *seen
-// (the tick count it last returned, updated), 0 when the link does not run, runs slower than the console's vsync (30 Hz power saving; a 60 Hz link for 120 Hz: the event cannot come from it)
-// or gives no tick within the timeout; the caller then keeps its own clock
-int mtl_link_wait_vsync(uint64_t *seen, int unit_hz, uint64_t timeout_ns) {
-    int rate = mtl_link_rate();
-    if (!mtl_link_active() || rate < unit_hz) return 0;
-    const uint64_t step = rate / unit_hz;
+// The display's vsync for vi::GetDisplayVsyncEvent (hle_sdk16.c): returns 1 at the first display-link tick of the next 60 Hz vsync after *seen (the tick count it last returned, updated),
+// 0 when the link does not run, runs at 30 Hz (power saving: the 60 Hz event cannot come from it) or gives no tick within the timeout; the caller then keeps its own clock
+int mtl_link_wait_vsync(uint64_t *seen, uint64_t timeout_ns) {
+    if (!mtl_link_active() || g_link_mode == 3) return 0;
+    const uint64_t step = g_link_mode == 2 ? 2 : 1;
     pthread_mutex_lock(&g_link_mu);
     if (*seen > g_link_tick_n || g_link_tick_n > *seen + 4 * step) *seen = g_link_tick_n;   // first call, or far behind (a stall): from the current tick on, no burst
     struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);

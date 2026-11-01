@@ -214,7 +214,6 @@ int mtl_fps_target(void);                                   // target frame rate
 int mtl_warm_wait(int timeout_ms);
 int mtl_link_active(void);
 int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns);   // vsyncs = the game's present interval
-int mtl_link_wait_units(int units, int unit_hz, uint64_t timeout_ns);   // units = the present interval counted in the console's vsyncs (unit_hz: 60, or 120 for a Switch 2 game)
 int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns);   // the same in the display link's own ticks
 int mtl_link_rate(void);   // the display link's rate: 120, 60 or 30 Hz
 double mtl_presented_time(uint64_t n);
