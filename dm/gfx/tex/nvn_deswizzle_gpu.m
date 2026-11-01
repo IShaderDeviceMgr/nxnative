@@ -8,7 +8,12 @@ static const char *const k_nvn_deswz_msl =
     "struct P { ulong src_off, dst_off, base, pitch; uint row_bytes, rows, slices, th, td, gobs_x; };\n"
     "kernel void deswz(device const uchar *src [[buffer(0)]], device uchar *dst [[buffer(1)]], constant P& p [[buffer(2)]], uint3 id [[thread_position_in_grid]]) {\n"
     " uint bh = 1u << p.th, bd = 1u << p.td, gobs_x = p.gobs_x, blocks_y = (p.rows + (8u * bh) - 1u) >> (3u + p.th);\n"
-    " uint tid = id.x & 31u, gob_x = id.x >> 5, gob_y = id.y, z = id.z; uint xseg = ((tid >> 4) << 1) | ((tid >> 1) & 1u), y = (gob_y << 3) | (((tid >> 2) & 3u) << 1) | (tid & 1u), x = (gob_x << 6) | (xseg << 4);\n"
+    " uint tid = id.x & 31u, gob_x = id.x >> 5, gob_y = id.y, z = id.z;\n"
+    "#if GOB2\n"   // Switch 2: sector bits y0 y1 x4 y2 x5 (nvn_deswizzle.c)
+    " uint xseg = ((tid >> 4) << 1) | ((tid >> 2) & 1u), y = (gob_y << 3) | (((tid >> 3) & 1u) << 2) | (tid & 3u), x = (gob_x << 6) | (xseg << 4);\n"
+    "#else\n"      // Switch 1: y0 x4 y1 y2 x5
+    " uint xseg = ((tid >> 4) << 1) | ((tid >> 1) & 1u), y = (gob_y << 3) | (((tid >> 2) & 3u) << 1) | (tid & 1u), x = (gob_x << 6) | (xseg << 4);\n"
+    "#endif\n"
     " if (x >= p.row_bytes || y >= p.rows || z >= p.slices) return;\n"
     " uint n = min(16u, p.row_bytes - x); ulong block = 512ul * bh * bd; ulong gob_in_block = ((ulong)(z & (bd - 1u)) << p.th) + (gob_y & (bh - 1u)); ulong so = p.src_off + p.base + ((ulong)(z >> p.td) * gobs_x * blocks_y + (gob_y >> p.th) * gobs_x + gob_x) * block + gob_in_block * 512ul + (ulong)tid * 16ul; ulong doff = p.dst_off + ((ulong)z * p.rows + y) * p.pitch + x;\n"
     " if (n == 16u && ((so | doff) & 15ul) == 0ul) *(device uint4 *)(dst + doff) = *(device const uint4 *)(src + so);\n"
@@ -19,7 +24,11 @@ static const char *const k_nvn_deswz_msl =
     " if(id.x>=p.width||id.y>=p.height||id.z>=p.layers)return;\n"
     " uint x=id.x*8u,y=id.y,bh=1u<<p.th,gy=y>>3;\n"
     " ulong off=p.src_off+p.base+ulong(id.z)*p.layer_stride+((ulong)(gy>>p.th)*p.gobs_x+(x>>6))*(512ul*bh)+(ulong)(gy&(bh-1u))*512ul;\n"
+    "#if GOB2\n"
+    " off+=((x&63u)>>5)*256u+((y&7u)>>2)*128u+((x&31u)>>4)*64u+((y&3u)>>1)*32u+(y&1u)*16u+(x&15u);\n"
+    "#else\n"
     " off+=((x&63u)>>5)*256u+((y&7u)>>1)*64u+((x&31u)>>4)*32u+(y&1u)*16u+(x&15u);\n"
+    "#endif\n"
     " dst.write(uint4(*(device const ushort4*)(src+off)),id.xy,id.z,p.level);\n"
     "}\n";
 
@@ -27,7 +36,9 @@ int nvn_deswz_gpu_init(id<MTLDevice> dev) {
     if (g_nvn_deswz_pipeline) return 0;
     if (!dev) return -1;
     NSError *error = nil;
-    id<MTLLibrary> library = [dev newLibraryWithSource:@(k_nvn_deswz_msl) options:nil error:&error];
+    MTLCompileOptions *options = [MTLCompileOptions new];
+    options.preprocessorMacros = @{ @"GOB2": @(nvn_gob_switch2()) };   // the GOB's sector order (nvn_deswizzle.c)
+    id<MTLLibrary> library = [dev newLibraryWithSource:@(k_nvn_deswz_msl) options:options error:&error];
     if (!library) return -1;
     id<MTLFunction> function = [library newFunctionWithName:@"deswz"];
     if (!function) return -1;

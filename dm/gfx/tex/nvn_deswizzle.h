@@ -15,6 +15,10 @@ int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void
 // row_bytes: the row as laid out, which a sparse texture's tiled levels pad to whole tiles (nvn_tex_level_gobs × 64)
 uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned tileH, unsigned tileD);
 
+// The GOB's sector order: Switch 1 (default) or Switch 2 (see nvn_deswizzle.c). Set once before the first texture; the GPU deswizzle reads it at nvn_deswz_gpu_init.
+void nvn_gob_set_switch2(int on);
+int nvn_gob_switch2(void);
+
 int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer,
                        uint32_t *row_bytes, uint32_t *rows, uint32_t *slices,
                        uint64_t *base, unsigned *tileH, unsigned *tileD, uint32_t *bpb);

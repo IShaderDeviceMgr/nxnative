@@ -68,10 +68,11 @@ static int run_case(id<MTLDevice> dev, id<MTLCommandQueue> queue, const test_cas
     return fail;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         if (!dev) { printf("BAD: no Metal device\n"); return 1; }
+        if (argc > 1 && !strcmp(argv[1], "switch2")) { nvn_gob_set_switch2(1); printf("Switch 2 GOB sector order\n"); }   // the GPU kernels against the CPU order
         if (nvn_deswz_gpu_init(dev)) { printf("BAD: GPU deswizzle pipeline init failed\n"); return 1; }
         id<MTLCommandQueue> queue = [dev newCommandQueue];
         test_case cases[] = {

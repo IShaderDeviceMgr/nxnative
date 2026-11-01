@@ -156,6 +156,21 @@ int main(void) {
         printf("  B%u (%u,%u,%u) → %llu %s  %s\n", i, B[i].x, B[i].y, B[i].z, (unsigned long long)got, got == B[i].want ? "✓" : "✗", B[i].how);
     }
 
+    // ---------- B2 Switch 2's GOB sector order (bits 5 and 6 trade places), and the hoisted copy tables against it ----------
+    printf("B2 Switch 2 GOB: (x%%64/32)·256 + (y%%8/4)·128 + (x%%32/16)·64 + (y%%4/2)·32 + (y%%2)·16 + x%%16\n");
+    nvn_gob_set_switch2(1);
+    {
+        struct { uint32_t x, y; uint64_t want; } G[] = {
+            {16, 0, 64}, {0, 2, 32}, {0, 1, 16}, {0, 4, 128}, {32, 0, 256}, {17, 3, 64 + 32 + 16 + 1}, {63, 7, 256 + 128 + 64 + 32 + 16 + 15},
+        };
+        for (unsigned i = 0; i < sizeof G / sizeof *G; i++) {
+            uint64_t got = nvn_bl_offset(G[i].x, G[i].y, 0, 64, 8, 0, 0);
+            CHECK(got == G[i].want, "B2 (%u,%u) got %llu expected %llu", G[i].x, G[i].y, (unsigned long long)got, (unsigned long long)G[i].want);
+        }
+        differential_shapes();
+    }
+    nvn_gob_set_switch2(0);
+
     // ---------- E hand-built 3D: place markers into block-linear storage at hand-calculated addresses, decode, and verify where the markers land (round trip A only proves self-consistency, not whether the layout is right) ----------
     // Source of the block height / block depth rule: deko3d dk_image.cpp - for 3D textures block height is fixed at 1 GOB, block depth = pickTileSize(depth + depth/2).
     printf("E hand-built 3D block-linear (markers at hand-calculated addresses, landing points checked after deswizzle)\n");

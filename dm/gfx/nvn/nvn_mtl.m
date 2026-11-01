@@ -461,6 +461,7 @@ void mtl_init(void) {
     }
     g_ev = [g_dev newSharedEvent];
     g_keep = [NSMutableArray array];
+    nvn_gob_set_switch2(DM_GAME_SWITCH2);   // Switch 2 orders a GOB's sectors differently (nvn_deswizzle.c)
     g_nvn_deswz_gpu = nvn_deswz_gpu_init(g_dev) == 0;
     dm_res_report_register(mtl_res_counts);
     if (!g_nvn_deswz_gpu) MLOG("[RED] GPU deswizzle init failed; swizzled textures fall back to the CPU");
