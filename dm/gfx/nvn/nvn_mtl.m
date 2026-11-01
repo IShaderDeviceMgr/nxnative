@@ -8528,7 +8528,7 @@ void ms_after(void) {
 // on Metal, writing and sampling the same attachment within one render pass is undefined: the Mac happens to read correctly, while the iPhone (A20 Pro) now and then reads whole 16x16 blocks as (1,0,1) and FXAA carries them into the picture - the magenta squares in 1-1
 // (measured with DM_NVN_MAGSCAN: the squares first appear on this attachment, and still appear with the particle dropped).
 // The fix: before this draw opens its render pass, end the current render pass (the attachment lands in memory), copy that level and layer into a snapshot texture in the replay stream, make this draw sample the snapshot; later draws reopen the render pass as usual (loading the attachment).
-// Only single-level 2D views that are exactly the attachment's level and layer are handled; other shapes are reported once and left as they were. Done only for the fragment shaders the game profile's feedback_snap lists (see fb_want)
+// A single-level 2D view of exactly the attachment's level and layer is copied as one image; a view over more levels or layers (a cube or array view of a mip chain) is copied whole (fb_snap_view); others (3D, multisample, views of views) are reported once and left as they were. Done only for the fragment shaders the game profile's feedback_snap lists (see fb_want)
 // Which fragment shaders get it: the game profile's feedback_snap (key prefixes, space-separated); DM_NVN_FB_SNAP=0 none, all every shader, <keys,...> another list. The cost of doing all:
 // Breath of the Wild has over a thousand draws a frame sampling the G-buffer of their own pass (frame time 16.6 -> 36.6 ms) and Mario Wonder's submit time went 1.4 -> 4.0 ms, so only shaders seen to break are listed
 static char g_fb_keys[16][20]; static int g_fb_nk = -1, g_fb_all;
@@ -8550,6 +8550,29 @@ static id<MTLTexture> fb_snap_tex(MTLPixelFormat pf, NSUInteger w, NSUInteger h)
     if (pool[next]) defer_obj_release(pool[next]); pool[next] = t; next = (next + 1) & 3;
     return t;
 }
+// A sampled view that covers more than the attachment (several levels or layers: Donkey Kong Bananza's environment probe bake 6003925bdb63c306 renders level 1 of six layers of a 128x128x24
+// RG11B10F array while sampling it through a cube-array view of all 8 levels; its reads of level 1 came back NaN now and then, and the lighting and bloom spread them into white blobs):
+// end the render pass, copy every level and layer the view covers into a snapshot of that shape, and return a view of the snapshot with the sampled view's type, format and swizzle
+static id<MTLTexture> fb_snap_view(id<MTLTexture> t, id<MTLTexture> base, NSUInteger tl, NSUInteger ts) {
+    MTLTextureType bt = base.textureType, vt = t.textureType;
+    if (base.parentTexture || t.sampleCount != 1 || (bt != MTLTextureType2D && bt != MTLTextureType2DArray && bt != MTLTextureTypeCube && bt != MTLTextureTypeCubeArray)) return nil;
+    NSUInteger nl = t.mipmapLevelCount, ns = t.arrayLength * (vt == MTLTextureTypeCube || vt == MTLTextureTypeCubeArray ? 6 : 1);
+    NSUInteger bs = base.arrayLength * (bt == MTLTextureTypeCube || bt == MTLTextureTypeCubeArray ? 6 : 1), w = MAX(base.width >> tl, 1ul), h = MAX(base.height >> tl, 1ul);
+    if (!nl || !ns || tl + nl > base.mipmapLevelCount || ts + ns > bs) return nil;
+    MTLTextureType st = ns == 1 && bt == MTLTextureType2D ? MTLTextureType2D : MTLTextureType2DArray;
+    static __strong id<MTLTexture> pool[4]; static int next;   // one per shape, reused as fb_snap_tex's
+    id<MTLTexture> snap = nil;
+    for (int i = 0; i < 4 && !snap; i++) if (pool[i] && pool[i].pixelFormat == base.pixelFormat && pool[i].width == w && pool[i].height == h && pool[i].mipmapLevelCount == nl && pool[i].arrayLength == (st == MTLTextureType2D ? 1 : ns) && pool[i].textureType == st) snap = pool[i];
+    if (!snap) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor new]; d.textureType = st; d.pixelFormat = base.pixelFormat; d.width = w; d.height = h; d.mipmapLevelCount = nl; d.arrayLength = st == MTLTextureType2D ? 1 : ns;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView; d.storageMode = MTLStorageModePrivate;
+        snap = [g_dev newTextureWithDescriptor:d]; if (!snap) return nil; res_add(snap);
+        if (pool[next]) defer_obj_release(pool[next]); pool[next] = snap; next = (next + 1) & 3;
+    }
+    if (g_enc) rp_end();
+    [(id<MTL4ComputeCommandEncoder>)blit() copyFromTexture:base sourceSlice:ts sourceLevel:tl toTexture:snap destinationSlice:0 destinationLevel:0 sliceCount:ns levelCount:nl];
+    return [snap newTextureViewWithPixelFormat:t.pixelFormat textureType:vt levels:NSMakeRange(0, nl) slices:NSMakeRange(0, ns) swizzle:t.swizzle];
+}
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot and register the substitution (used by this draw's argument encoding)
 static void fb_prepare(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
@@ -8568,7 +8591,14 @@ static void fb_prepare(NvProg *pr) {
             id<MTLTexture> base = t.parentTexture ? t.parentTexture : t; NSUInteger tl = t.parentTexture ? t.parentRelativeLevel : 0, ts = t.parentTexture ? t.parentRelativeSlice : 0;
             if (tl + t.mipmapLevelCount <= (NSUInteger)lv || tl > (NSUInteger)lv) continue;   // the sampled levels do not include the attachment's level (mip generation etc.): not feedback
             if (t.textureType != MTLTextureType2D || t.mipmapLevelCount != 1 || t.sampleCount != 1 || ts != (NSUInteger)sl || b->dtt != MTLTextureType2D || base.parentTexture) {
-                RED_ONCE(80, "same-pass feedback sampling: the sampled view is not a single-level 2D view of the attachment's level and layer (type %lu levels %lu+%lu layer %lu, attachment level %d layer %d, shader %s); left as is", (unsigned long)t.textureType, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)ts, lv, sl, fs->key);
+                id<MTLTexture> use = fb_snap_view(t, base, tl, ts);   // a view over more levels or layers than the attachment's: snapshot all it covers
+                if (!use) { RED_ONCE(80, "same-pass feedback sampling: the sampled view (type %lu levels %lu+%lu layer %lu, attachment level %d layer %d, shader %s) cannot be snapshotted; left as is", (unsigned long)t.textureType, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)ts, lv, sl, fs->key); continue; }
+                if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
+                g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;
+                if (g_fb_count++ == 0 || g_fb_count == 10 || g_fb_count == 1000 || g_fb_count % 100000 == 0)
+                    MLOG("same-pass feedback sampling: snapshot #%llu of a %lu-level %lu-layer view (frame %llu pass %llu, shader %s slot %d samples attachment %d ser=%llu level %d layer %d)", (unsigned long long)g_fb_count, (unsigned long)use.mipmapLevelCount, (unsigned long)use.arrayLength,
+                         (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass + !g_enc, fs->key, b->reg, k, (unsigned long long)ser, lv, sl);
+                PD("N %llu same-pass feedback sampling: attachment %d ser=%llu level %d layer %d inside a sampled view of levels %lu+%lu layers %lu+: the view copied into a snapshot; this draw samples the snapshot", g_stat_pass + !g_enc, k, (unsigned long long)ser, lv, sl, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)ts);
                 continue; }
             NSUInteger w = MAX(base.width >> lv, 1ul), h = MAX(base.height >> lv, 1ul);
             id<MTLTexture> snap = fb_snap_tex(base.pixelFormat, w, h); if (!snap) continue;
