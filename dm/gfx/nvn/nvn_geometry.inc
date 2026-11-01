@@ -371,8 +371,10 @@ static int geo_mesh_on(void) {
     return on;
 }
 enum { GEO_MESH_PRIMS = 32, GEO_MESH_DRAW_SLOT = 12, GEO_MESH_GS_SLOT = 13 };   // = dmsh_mesh.py PRIMS, DRAW_SLOT, GS_SLOT
+// Triangles per mesh threadgroup: PRIMS, or the <n> of an entry named ..._p<n> (dmsh_mesh.py entry_name: a vertex with many outputs takes fewer, to fit Metal's 32 KB mesh output)
+static uint32_t geo_mesh_prims(id<MTLFunction> f) { const char *p = strstr(f.name.UTF8String, "_p"); return p ? (uint32_t)atoi(p + 2) : GEO_MESH_PRIMS; }
 typedef struct { uint64_t ib; uint32_t itype, first, count; int32_t base_vertex; uint32_t base_instance, pad; } geo_mesh_args;   // dmsh_mesh.py dm_mesh_draw
-static struct { int on, miss; __unsafe_unretained id<MTLFunction> fn; __unsafe_unretained NvShader *lean; geo_mesh_args a; } g_geo_mesh;
+static struct { int on, miss; uint32_t prims; __unsafe_unretained id<MTLFunction> fn; __unsafe_unretained NvShader *lean; geo_mesh_args a; } g_geo_mesh;
 // The mesh entry for this draw's program, or nil (the compute path draws it)
 static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     if (!geo_mesh_on()) return nil;
@@ -386,7 +388,8 @@ static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_id
     if (!f) {
         NSString *path = [NSString stringWithFormat:@"%@/%.16s_%.16s_m3.metallib", g_msl_dir, vs->key, lean->key];
         id<MTLLibrary> lib = [NSFileManager.defaultManager fileExistsAtPath:path] ? [g_dev newLibraryWithURL:[NSURL fileURLWithPath:path] error:nil] : nil;
-        f = lib ? [lib newFunctionWithName:[vs->fn.name isEqualToString:@"main0_z"] ? @"dm_mesh_z" : @"dm_mesh"] : nil;
+        NSString *base = [vs->fn.name isEqualToString:@"main0_z"] ? @"dm_mesh_z" : @"dm_mesh";
+        for (int pr_n = GEO_MESH_PRIMS; lib && !f && pr_n >= 4; pr_n /= 2) f = [lib newFunctionWithName:pr_n == GEO_MESH_PRIMS ? base : [NSString stringWithFormat:@"%@_p%d", base, pr_n]];
         static int n; if (f || n++ < 16) MLOG("geometry mesh: vertex %s kernel %s %s", vs->key, lean->key, f ? "has a mesh library" : "has no mesh library (geo_mesh.tsv): the compute path draws it");
         vs->geo_mesh[k] = f = f ?: NSNull.null;
     }
@@ -419,7 +422,10 @@ static id<MTLRenderPipelineState> geo_mesh_pso(NvProg *pr) {
         });
         return nil;
     }
-    return ps == NSNull.null || ps == g_pso_mesh_building ? nil : ps;
+    // A pipeline that failed to build: the pair draws through the compute path from now on, where its draws are hoisted into runs again (geo_run_walk ends a run
+    // at a draw that has a mesh entry, so a pair whose pipeline failed would otherwise cost a capture pass, a compute encoder and a pass break per draw)
+    if (ps == NSNull.null) { vs->geo_mesh[@(g_geo_mesh.lean->key)] = NSNull.null; return nil; }
+    return ps == g_pso_mesh_building ? nil : ps;
 }
 // The draw itself (draw() calls it with its pipeline, the vertex and fragment arguments and the pulling layout bound): the kernel's arguments, with vb_info
 // m0 = (0, 1 instance) and m1.x = the draw's triangles, and the draw's index source
@@ -433,7 +439,8 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
     uint64_t save[5]; memcpy(save, g_geo_bind, sizeof save); memset(g_geo_bind, 0, sizeof g_geo_bind); g_geo_bind[3] = b.gpuAddress + o;
     g_args_dirty[2] = 1; g_args_mesh = GEO_MESH_GS_SLOT; encode_args(en, g_geo_mesh.lean, 2, 0); g_args_mesh = 0; g_args_dirty[2] = 1;
     memcpy(g_geo_bind, save, sizeof save);
-    [en drawMeshThreadgroups:MTLSizeMake((tris + GEO_MESH_PRIMS - 1) / GEO_MESH_PRIMS, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(3 * GEO_MESH_PRIMS, 1, 1)];
+    uint32_t np = g_geo_mesh.prims;
+    [en drawMeshThreadgroups:MTLSizeMake((tris + np - 1) / np, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(3 * np, 1, 1)];
 }
 static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the compute path drew while their mesh pipeline was built
 static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
@@ -443,7 +450,7 @@ static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     uint32_t bi = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     NvProg *raster = pr->geo_lean_raster;
     if (!raster || raster->sh[0] != pr->sh[0] || raster->sh[1] != pr->sh[1]) { raster = [NvProg new]; raster->sh[0] = pr->sh[0]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
-    g_geo_mesh.on = 1; g_geo_mesh.miss = 0; g_geo_mesh.fn = fn; g_geo_mesh.lean = pr->sh[2]->geo_lean_v[3];
+    g_geo_mesh.on = 1; g_geo_mesh.miss = 0; g_geo_mesh.fn = fn; g_geo_mesh.prims = geo_mesh_prims(fn); g_geo_mesh.lean = pr->sh[2]->geo_lean_v[3];
     g_geo_mesh.a = (geo_mesh_args){ib, di ? 1u << di->itype : 0, dw ? (uint32_t)dw->first : 0, (uint32_t)(dw ? dw->count : di->count), di ? di->base_vertex : 0, bi, 0};
     g_geo_program = raster;
     p_draw synthetic = {.prim = 4, .count = 3, .instances = 1, .base_instance = (int32_t)bi};
