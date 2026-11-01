@@ -49,7 +49,8 @@
 #define DMSH_KIND_C1 "c1"                // the shader's own constant segment c[1] (its bytes are the json's c1)
 #define DMSH_KIND_DRVCB "drvcb"          // a driver segment, c[bank] (bank 0 or 2): NVN_RB_DRV0 / NVN_RB_DRV2
 #define DMSH_KIND_SUPPORT "support"      // the translator's support buffer
-#define DMSH_KIND_GUEST_MAP "guest_map"  // the guest memory map (nvn_mtl.m guest_map_gpu) for global memory the translator traced to no storage buffer; rw = the shader writes through it
+#define DMSH_KIND_GUEST_MAP "guest_map"  // the guest memory map (nvn_mtl.m guest_map) for global memory the translator traced to no storage buffer
+#define DMSH_KIND_GUEST_LOG "guest_log"  // the write log of a shader writing through the guest memory map (nvn_mtl.m glog_bind): pages written per map entry
 #define DMSH_KIND_GEOMETRY "geometry"    // one of the geometry lowering's helper buffers, reg = its index (dmsh_geometry.py HELPERS)
 #define DMSH_KIND_SBUF "sbuf"            // storage buffer slot reg, its address in the stage's c0 table; rw = the shader writes it
 #define DMSH_KIND_SBUF_UBO "sbuf_ubo"    // a storage buffer whose address the game keeps in its own uniform slot reg at byte off

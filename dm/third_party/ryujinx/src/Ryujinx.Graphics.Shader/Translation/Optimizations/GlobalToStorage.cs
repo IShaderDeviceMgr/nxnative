@@ -993,12 +993,17 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             Operand value)
         {
             bool isStore = inst.IsAtomic() || inst == Instruction.Store;
-            int binding = resourceManager.GetGuestMapBinding(isStore);
+            int binding = resourceManager.GetGuestMapBinding();
 
-            Operand found = GenerateGuestMapLookup(context, binding, addrLow, addrHigh, out Operand hostLow, out Operand hostHigh);
+            Operand found = GenerateGuestMapLookup(context, binding, addrLow, addrHigh, out Operand entry, out Operand hostLow, out Operand hostHigh);
 
             Operand lblMiss = Label();
             context.BranchIfFalse(lblMiss, found);
+
+            if (isStore)
+            {
+                GenerateGuestLogWrite(context, resourceManager.GetGuestLogBinding(), binding, entry, addrLow, addrHigh);
+            }
 
             // the map's offsets are multiples of 4 KB (pages map to pages), so the host address has the guest address's byte within its word
             Operand wordLow = context.BitwiseAnd(hostLow, Const(-4));
@@ -1098,7 +1103,24 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // length (GuestMapSteps halvings, up to 2^GuestMapSteps entries) finds the last entry starting at or before the address, then checks that the address is before its end
         private const int GuestMapSteps = 16;
 
-        private static Operand GenerateGuestMapLookup(EmitterContext context, int binding, Operand addrLow, Operand addrHigh, out Operand hostLow, out Operand hostHigh)
+        // nxnative: the write log (nvn_mtl.m glog_*): the host cannot know which memory such a write reaches, so the shader records it. Two 32-bit words per map entry: the bitwise NOT
+        // of the lowest 4 KB page written (counted from the entry's guest start) and the highest page written + 1, both kept with atomic max, so a log zeroed before the draw means
+        // nothing written; the host reads it once the GPU work has completed
+        private static void GenerateGuestLogWrite(EmitterContext context, int logBinding, int mapBinding, Operand entry, Operand addrLow, Operand addrHigh)
+        {
+            Operand startLow = context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(context.ShiftLeft(entry, Const(3)), Const(4)));
+            Operand startHigh = context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(context.ShiftLeft(entry, Const(3)), Const(5)));
+            Operand borrow = context.ConditionalSelect(context.ICompareLessUnsigned(addrLow, startLow), Const(1), Const(0));
+            Operand offLow = context.ISubtract(addrLow, startLow);
+            Operand offHigh = context.ISubtract(context.ISubtract(addrHigh, startHigh), borrow);
+            Operand page = context.BitwiseOr(context.ShiftRightU32(offLow, Const(12)), context.ShiftLeft(offHigh, Const(20)));
+            Operand word = context.ShiftLeft(entry, Const(1));
+
+            context.AtomicMaxU32(StorageKind.StorageBuffer, logBinding, Const(0), word, context.BitwiseNot(page));
+            context.AtomicMaxU32(StorageKind.StorageBuffer, logBinding, Const(0), context.IAdd(word, Const(1)), context.IAdd(page, Const(1)));
+        }
+
+        private static Operand GenerateGuestMapLookup(EmitterContext context, int binding, Operand addrLow, Operand addrHigh, out Operand entry, out Operand hostLow, out Operand hostHigh)
         {
             Operand Word(Operand entry, int word) =>
                 context.Load(StorageKind.StorageBuffer, binding, Const(0), context.IAdd(context.ShiftLeft(entry, Const(3)), Const(4 + word)));
@@ -1111,7 +1133,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             Operand count = context.Load(StorageKind.StorageBuffer, binding, Const(0), Const(0));
             Operand last = context.ISubtract(count, Const(1));
-            Operand entry = Const(0);
+            entry = Const(0);
 
             for (int step = GuestMapSteps - 1; step >= 0; step--)
             {

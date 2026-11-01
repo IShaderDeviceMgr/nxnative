@@ -649,26 +649,33 @@ namespace Ryujinx.Graphics.Shader.Translation
         // address of the same byte (nvn_mtl.m guest_map; layout in GlobalToStorage.GenerateGuestMapLookup). Declared by the first global memory access no storage buffer slot was found
         // for, named guest_map_w once one of them writes (the host then counts the draw or dispatch as a GPU write it cannot place)
         private SetBindingPair _guestMap = new(-1, -1);
-        private bool _guestMapWritten;
+        private SetBindingPair _guestLog = new(-1, -1);
 
-        public int GetGuestMapBinding(bool write)
+        // nxnative: the guest memory map (GlobalToStorage.GenerateGuestMapLookup), read only
+        public int GetGuestMapBinding()
         {
             if (_guestMap.Binding < 0)
             {
                 _guestMap = _gpuAccessor.CreateStorageBufferBinding(0);
             }
 
-            _guestMapWritten |= write;
             Properties.UsesHostMemory = true;
-
-            StructureType type = new(new[]
-            {
-                new StructureField(AggregateType.Array | AggregateType.U32, "data", 0),
-            });
-
-            Properties.AddOrUpdateStorageBuffer(new(BufferLayout.Std430, _guestMap.SetIndex, _guestMap.Binding, _guestMapWritten ? "guest_map_w" : "guest_map", type));
+            AddNewStorageBuffer(_guestMap.SetIndex, _guestMap.Binding, "guest_map");
 
             return _guestMap.Binding;
+        }
+
+        // nxnative: the write log of a shader writing through the guest memory map (GlobalToStorage.GenerateGuestLogWrite): the host gives each draw its own, zeroed
+        public int GetGuestLogBinding()
+        {
+            if (_guestLog.Binding < 0)
+            {
+                _guestLog = _gpuAccessor.CreateStorageBufferBinding(0);
+            }
+
+            AddNewStorageBuffer(_guestLog.SetIndex, _guestLog.Binding, "guest_log");
+
+            return _guestLog.Binding;
         }
 
         private void AddNewStorageBuffer(int setIndex, int binding, string name)

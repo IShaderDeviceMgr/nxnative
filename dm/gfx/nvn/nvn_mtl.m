@@ -512,10 +512,11 @@ static _Atomic uint64_t g_reg_gen = 1;   // Change generation of memory pool / t
 // (they measured on a 17 Pro Max a 512 MB render-target pool addressed 0 times in a run, with about 530 MB more device wired memory; a 4 GB A14 was ended by the system within seconds of launch because of it).
 // So a pool is not put into the residency set when created; it is put in, and the residency set committed on the spot, the first time the GPU gets its address through mtl_addr / mtl_gpu_addr -- these are the only two ways the GPU gets pool addresses,
 // and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu
-static void pool_res(int i) {
+static void pool_res_add(int i) {   // without the commit: the caller commits once for many
     if (g_pools[i].res) return;
-    res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
+    res_add(g_pools[i].buf); g_pools[i].res = 1; g_pool_res_n++;
 }
+static void pool_res(int i) { if (!g_pools[i].res) { pool_res_add(i); res_commit(); } }
 void mtl_pool_add(const void *mem, uint64_t size) {
     mtl_init(); g_reg_gen++;
     uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
@@ -603,32 +604,32 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
 // vertex shader 0459a55e79335cf6, stores {0, 1, 0, 0, 0} through pointers it loads from a table) looks the guest address up here and goes to the host GPU address of the same byte
 // (GlobalToStorage.cs GenerateGuestMapLookup, binding kind DMSH_KIND_GUEST_MAP). 32-bit words: n, 3 unused, then n entries of 8 words sorted by guest start: guest start, guest end, host
 // offset (host GPU address − guest address), 64 bits each, 2 unused. Remade when a pool is added or removed (the old one is released once the GPU work using it completes). Such a shader
-// can reach any pool, so every pool is put into the residency set when a map is made (pool_res; on demand otherwise). Overlapping pools: the search finds the last one starting at or before
-// the address. Caller holds nothing
+// can reach any pool, so every pool is put into the residency set when a map is made (pool_res_add, one commit for all: a commit per pool took 1844 commits and 357 ms in one frame of
+// Bananza; on demand otherwise). Overlapping pools: the search finds the last one starting at or before the address. Caller holds nothing. Returns the map buffer (encode thread only)
 static __strong id<MTLBuffer> g_gmap; static uint64_t g_gmap_gen, g_gmap_gpu;
 static int gmap_cmp(const void *a, const void *b) { uint64_t x = ((const uint64_t *)a)[0], y = ((const uint64_t *)b)[0]; return x < y ? -1 : x > y; }
-static uint64_t guest_map_gpu(void) {
+static id<MTLBuffer> guest_map(void) {
     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
-    if (g_gmap && g_gmap_gen == gen) return g_gmap_gpu;
+    if (g_gmap && g_gmap_gen == gen) return g_gmap;
     pthread_mutex_lock(&g_mu);
     gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
     int n = g_npool > 0 ? g_npool : 1;
     id<MTLBuffer> b = [g_dev newBufferWithLength:16 + 32ull * n options:MTLResourceStorageModeShared];   // all 0: one empty entry when there is no pool
     uint64_t *e = (uint64_t *)((uint8_t *)b.contents + 16);
     *(uint32_t *)b.contents = (uint32_t)n;
-    for (int i = 0; i < g_npool; i++) { pool_res(i); e[4 * i] = g_pools[i].lo; e[4 * i + 1] = g_pools[i].hi; e[4 * i + 2] = g_pools[i].gpu - g_pools[i].base; }
+    for (int i = 0; i < g_npool; i++) { pool_res_add(i); e[4 * i] = g_pools[i].lo; e[4 * i + 1] = g_pools[i].hi; e[4 * i + 2] = g_pools[i].gpu - g_pools[i].base; }
     qsort(e, (size_t)g_npool, 32, gmap_cmp);
     res_add(b); res_commit();
     if (g_gmap) defer_obj_release(g_gmap);
     g_gmap = b; g_gmap_gpu = b.gpuAddress; g_gmap_gen = gen;
     { static int nlog; if (nlog++ < 4) MLOG("guest memory map: %d memory pools, all resident (a shader reaches guest memory through addresses no storage buffer holds)", g_npool); }
     pthread_mutex_unlock(&g_mu);
-    return g_gmap_gpu;
+    return g_gmap;
 }
 
 // ---------- Submission ----------
 static void defer_reset(void); static void defer_fallback(void);
-typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; void *vis; uint32_t seg; } post_op;   // vis: the visibility slot table for kind 3, the readback for kind 4; seg: the segment it was encoded in (sub_cut)
+typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; void *vis; uint32_t seg; } post_op;   // vis: the visibility slot table for kind 3, the readback for kind 4, the write log for kind 5 (glog_land); seg: the segment it was encoded in (sub_cut)
 static void mirror_rb_land(void *m);   // kind 4: a GPU copy's bytes read back into the destination texture's storage (mirror_readback)
 static uint32_t g_seg;   // Index of the segment being encoded in this submission (0 until the first sub_cut)
 typedef struct seg_clk seg_clk; static seg_clk *g_sclk; static void seg_clk_put(seg_clk *c);   // Counter timestamps by segment (see gpu_ticks)
@@ -1290,6 +1291,64 @@ static void post(post_op o) {
 }
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post((post_op){1, val, mode, v, 0, 0, NULL}); }
 void mtl_sub_counter(uint64_t addr, uint32_t type) { sbw_note(addr, 16, SBW_REPORT); post((post_op){2, NULL, 0, 0, addr, type, NULL, g_seg}); }
+// ---------- Writes through the guest memory map ----------
+// A shader writing through the guest memory map (guest_map) can write any memory; which, the host learns only from the shader's write log (GlobalToStorage.cs GenerateGuestLogWrite,
+// binding kind DMSH_KIND_GUEST_LOG): per map entry the lowest and the highest 4 KB page written. Each encode of its bindings gets a zeroed log, read when the submission completes
+// (glog_land). The pages are needed at encode time, though (sbw_note: the CPU-side shadows and copies of this submission must not take memory the GPU writes in it), so they are
+// predicted from what the same shader wrote before (glog_bind). Until it has written once, and after GLOG_MISSES writes outside the prediction, it counts as writing anywhere
+// (sbw_note(0, 0), which refuses every shadow read of the submission and every later one until it completes: Donkey Kong Bananza's cave floor reset, once a frame, took frames
+// from 33 to 465 ms that way). Open: a write outside the prediction is not seen by the shadows of its own submission (the prediction grows when it completes)
+enum { GLOG_SH = 64, GLOG_R = 32, GLOG_MISSES = 16 };
+typedef struct { int n; uint64_t lo[GLOG_R], hi[GLOG_R]; } glog_set;   // guest address ranges, sorted, not touching
+typedef struct { char key[24]; int miss, any; glog_set s; } glog_sh;   // any: counts as writing anywhere from now on
+static glog_sh g_glog[GLOG_SH]; static int g_nglog; static os_unfair_lock g_glog_mu = OS_UNFAIR_LOCK_INIT;
+typedef struct { int sh, n; void *map, *log; size_t off; glog_set pred; } glog_rec;   // pred.n 0: no prediction was made (the draw counted as writing anywhere)
+static int glog_has(const glog_set *s, uint64_t lo, uint64_t hi) { for (int i = 0; i < s->n; i++) if (s->lo[i] <= lo && hi <= s->hi[i]) return 1; return 0; }
+static int glog_add(glog_set *s, uint64_t lo, uint64_t hi) {   // 0: no room (GLOG_R ranges)
+    int i = 0; while (i < s->n && s->hi[i] < lo) i++;
+    int j = i; while (j < s->n && s->lo[j] <= hi) j++;   // ranges i .. j - 1 touch [lo, hi)
+    if (j > i) { lo = MIN(lo, s->lo[i]); hi = MAX(hi, s->hi[j - 1]); }
+    else if (s->n == GLOG_R) return 0;
+    memmove(&s->lo[i + 1], &s->lo[j], (size_t)(s->n - j) * 8); memmove(&s->hi[i + 1], &s->hi[j], (size_t)(s->n - j) * 8);
+    s->n += 1 - (j - i); s->lo[i] = lo; s->hi[i] = hi; return 1;
+}
+// The log for one encode of the bindings of shader key with the map gm; notes the pages it is predicted to write
+static uint64_t glog_bind(const char *key, id<MTLBuffer> gm) {
+    int n = (int)*(const uint32_t *)gm.contents;
+    __strong id<MTLBuffer> lb; size_t off = arena_alloc(8ull * n, &lb); memset((uint8_t *)lb.contents + off, 0, 8ull * n);
+    glog_rec *r = calloc(1, sizeof *r); r->sh = -1;
+    os_unfair_lock_lock(&g_glog_mu);
+    for (int i = 0; i < g_nglog; i++) if (!strcmp(g_glog[i].key, key)) { r->sh = i; break; }
+    if (r->sh < 0 && g_nglog < GLOG_SH) { r->sh = g_nglog++; snprintf(g_glog[r->sh].key, sizeof g_glog[r->sh].key, "%s", key); }
+    if (r->sh >= 0 && !g_glog[r->sh].any) r->pred = g_glog[r->sh].s;
+    os_unfair_lock_unlock(&g_glog_mu);
+    if (!r->pred.n) sbw_note(0, 0, SBW_GPU);
+    for (int i = 0; i < r->pred.n; i++) sbw_note(r->pred.lo[i], r->pred.hi[i] - r->pred.lo[i], SBW_GPU);
+    r->n = n; r->map = (void *)CFBridgingRetain(gm); r->log = (void *)CFBridgingRetain(lb); r->off = off;
+    post((post_op){5, NULL, 0, 0, 0, 0, r, 0});
+    return lb.gpuAddress + off;
+}
+// Once the GPU work has completed: what the draw wrote goes into its shader's set
+static void glog_land(glog_rec *r) {
+    const uint64_t *e = (const uint64_t *)((const uint8_t *)((__bridge id<MTLBuffer>)r->map).contents + 16);
+    const uint32_t *w = (const uint32_t *)((const uint8_t *)((__bridge id<MTLBuffer>)r->log).contents + r->off);
+    if (r->sh >= 0) {
+        os_unfair_lock_lock(&g_glog_mu);
+        glog_sh *g = &g_glog[r->sh]; int missed = 0, full = 0;
+        for (int i = 0; i < r->n && !g->any; i++) {
+            if (!w[2 * i + 1]) continue;
+            uint64_t lo = e[4 * i] + ((uint64_t)~w[2 * i] << 12), hi = e[4 * i] + ((uint64_t)w[2 * i + 1] << 12);
+            if (r->pred.n && !glog_has(&r->pred, lo, hi)) missed = 1;
+            if (!glog_has(&g->s, lo, hi) && !glog_add(&g->s, lo, hi)) full = 1;
+        }
+        if (!g->any && (full || (missed && ++g->miss >= GLOG_MISSES))) {
+            g->any = 1; MLOG("[RED] shader %s writes through the guest memory map outside what it wrote before (%d times%s): it counts as writing anywhere from now on (slow: every CPU-side shadow is refused)", g->key, g->miss, full ? ", too many ranges" : "");
+        } else if (missed || !r->pred.n) { static int nlog; if (nlog++ < 16) { uint64_t pg = 0; for (int i = 0; i < g->s.n; i++) pg += (g->s.hi[i] - g->s.lo[i]) >> 12;
+            MLOG("guest memory writes: shader %s writes %d ranges, %llu pages%s", g->key, g->s.n, (unsigned long long)pg, missed ? " (outside its prediction: not seen by that submission's shadows)" : ""); } }
+        os_unfair_lock_unlock(&g_glog_mu);
+    }
+    CFRelease(r->map); CFRelease(r->log); free(r);
+}
 void mtl_counter_stats(uint64_t rep[32], uint64_t rst[32]) { memcpy(rep, g_cnt_report, sizeof g_cnt_report); memcpy(rst, g_cnt_reset, sizeof g_cnt_reset); }
 
 // Counter timestamps (614.4 MHz) are taken from the guest clock (hle_os.c guest_ns, the same epoch as svc GetSystemTick / cntpct, whose ticks are 19.2 MHz).
@@ -1487,6 +1546,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
             free(l); uint64_t rec[2] = {sum, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
         }
         else if (ops[i].kind == 4) mirror_rb_land(ops[i].vis);
+        else if (ops[i].kind == 5) glog_land(ops[i].vis);
         else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {(ops[i].type == 0 || ops[i].type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // render_cond: a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }
     free(ops); seg_clk_put(sc); r->ops = NULL; r->sc = NULL;
@@ -4664,7 +4724,7 @@ static void swrite_note(NvProg *pr) {
     if (!pr) return;
     if (g_pass_swrite) { g_vbuf_write_epoch++; return; }   // further shader writes also invalidate aligned vertex snapshots
     for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
-        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP || sh->rf.b[i].kind == NVN_RB_GMAP)) { g_pass_swrite = 1; g_vbuf_write_epoch++; return; } }
+        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP || sh->rf.b[i].kind == NVN_RB_GLOG)) { g_pass_swrite = 1; g_vbuf_write_epoch++; return; } }
 }
 static void udc_note_draw(NvProg *pr) {
     int td = tbdr_on();
@@ -4683,7 +4743,7 @@ static void udc_note_draw(NvProg *pr) {
         if (st == 1) shader_color_mask = sh->rf.color_known ? sh->rf.color_mask : UINT32_MAX;
         // A writable image, atomic image pointer or storage pointer may alias an attachment. Do not infer its identity from bound texture slots (bindless shaders need not use them).
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
-            if (b->rw && (b->kind == NVN_RB_IMG || b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_SBUFU || b->kind == NVN_RB_GMAP)) { image_write = 1; break; } }
+            if (b->rw && (b->kind == NVN_RB_IMG || b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_SBUFU || b->kind == NVN_RB_GLOG)) { image_write = 1; break; } }
         if (image_write) break;
     }
     if (R.has_rt) for (int i = 1; i < R.rt.n && i < 8; i++)   // a slot attached twice (left unattached) really written: the writes are lost (see rt_dup_slot)
@@ -6746,6 +6806,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     static uint64_t bl_pass[6]; static int bl_all = -1; if (bl_all < 0) bl_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;   // Record on every new encode (otherwise only the first time per pass per stage)
     int bl = passdump() && (bl_all || g_kd_force || bl_pass[nvn_stage] != g_stat_pass);
     if (bl) { bl_pass[nvn_stage] = g_stat_pass; PD("K %llu st%d key=%s nb=%d", g_stat_pass, nvn_stage, sh->key[0] ? sh->key : sh->builtin ? sh->builtin : "?", sh->rf.nb); }
+    __strong id<MTLBuffer> gm = nil;   // the guest memory map, one for all of this shader's bindings
     os_unfair_lock_lock(&g_rmu);   // The texture / sampler registration tables may be being grown or rewritten by the game thread
     for (int i = 0; i < sh->rf.nb; i++) {
         const nvn_rbind *b = &sh->rf.b[i];
@@ -6915,10 +6976,10 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             id<MTLBuffer> cb = sh->c1buf ? sh->c1buf : zero_bank();   // c1 has length 0 (600 of them in the whole library) yet the shader still declares it: reads 0
             slots[aid] = (sh->c1buf ? sh->c1_gpu : zero_bank_gpu()) + (sh->c1buf ? sh->c1off : 0);
             USE(cb, MTLResourceUsageRead);
-        } else if (b->kind == NVN_RB_GMAP) {   // B: the guest memory map (guest_map_gpu); a shader writing through it writes memory no range here names
-            slots[aid] = guest_map_gpu();
-            if (b->rw) sbw_note(0, 0, SBW_GPU);
-            if (bl) PD("B %llu st%d guest_map %s", g_stat_pass, nvn_stage, b->rw ? "rw" : "ro");
+        } else if (b->kind == NVN_RB_GMAP || b->kind == NVN_RB_GLOG) {   // B: the guest memory map (guest_map) and the write log of a shader writing through it (glog_bind), both from one map
+            if (!gm) gm = guest_map();
+            slots[aid] = b->kind == NVN_RB_GMAP ? gm.gpuAddress : glog_bind(sh->key, gm);
+            if (bl) PD("B %llu st%d guest_%s", g_stat_pass, nvn_stage, b->kind == NVN_RB_GMAP ? "map" : "log");
         } else if (b->kind == NVN_RB_SUPPORT) {   // support_buffer: scale 1.0, BGRA swap 0, viewport transform not disabled (viewport fields are not read)
             slots[aid] = support_gpu();
             USE(support_buf(), MTLResourceUsageRead);
